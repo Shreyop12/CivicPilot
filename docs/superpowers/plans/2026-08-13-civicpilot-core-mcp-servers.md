@@ -1223,7 +1223,9 @@ git commit -m "feat: add USAspending async bulk-download client"
 
 **Interfaces:**
 - Consumes: `USASpendingClient` (Task 7), `USASpendingDownloadClient` (Task 8)
-- Produces: `build_usaspending_server(client, download_client) -> FastMCP`, exposing three real MCP tools — `query_spending` (actions: `search_awards`, `get_award`, `spending_by_agency`), `submit_spending_query`, `get_spending_result` — plus in-process callable attributes `._query_spending_impl(action, toptier_code, start_date=None, end_date=None, award_id=None, fiscal_year=None) -> dict`, `._submit_spending_query_impl(...) -> dict`, `._get_spending_result_impl(job_id) -> dict`. Used by Task 11 and Task 12.
+- Produces: `build_usaspending_server(client, download_client) -> FastMCP`, exposing one consolidated MCP tool `query_spending` (actions: `search_awards`, `get_award`, `spending_by_agency`, `submit_bulk_download`, `get_bulk_download_result`) — action-enum consolidated per the Global Constraints rather than split across separate tools — plus an in-process callable attribute `._query_spending_impl(action, toptier_code=None, start_date=None, end_date=None, award_id=None, fiscal_year=None, job_id=None) -> dict`. Used by Task 11 and Task 12.
+
+Design note: an earlier draft of this task exposed `submit_spending_query`/`get_spending_result` as two separate tools alongside `query_spending`. Consolidating them into `query_spending`'s action enum keeps this task consistent with the Global Constraints' action-enum rule, and — more importantly — is what makes the async bulk-download path reachable from Task 11's orchestrator at all (see the spec's worked example, step 5, which routes the flagship query's spending lookup through this async path).
 
 - [ ] **Step 1: Write the failing tests for `query_spending` dispatch**
 
@@ -1233,28 +1235,24 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from civicpilot.servers.usaspending_server import (
-    MAX_POLL_WINDOW_SECONDS,
-    _get_spending_result_impl,
-    _query_spending_impl,
-    _submit_spending_query_impl,
-    build_usaspending_server,
-)
+from civicpilot.servers.usaspending_server import MAX_POLL_WINDOW_SECONDS, _query_spending_impl
 
 
 @pytest.mark.asyncio
 async def test_query_spending_search_awards_requires_dates():
     client = AsyncMock()
+    download_client = AsyncMock()
     with pytest.raises(ValueError, match="start_date and end_date are required"):
-        await _query_spending_impl(client, action="search_awards", toptier_code="068")
+        await _query_spending_impl(client, download_client, action="search_awards", toptier_code="068")
 
 
 @pytest.mark.asyncio
 async def test_query_spending_dispatches_search_awards():
     client = AsyncMock()
     client.search_awards.return_value = {"results": []}
+    download_client = AsyncMock()
     result = await _query_spending_impl(
-        client, action="search_awards", toptier_code="068",
+        client, download_client, action="search_awards", toptier_code="068",
         start_date="2026-01-01", end_date="2026-03-31",
     )
     assert result == {"results": []}
@@ -1264,7 +1262,8 @@ async def test_query_spending_dispatches_search_awards():
 async def test_query_spending_dispatches_get_award():
     client = AsyncMock()
     client.get_award.return_value = {"id": "AWD-1"}
-    result = await _query_spending_impl(client, action="get_award", toptier_code="068", award_id="AWD-1")
+    download_client = AsyncMock()
+    result = await _query_spending_impl(client, download_client, action="get_award", award_id="AWD-1")
     assert result == {"id": "AWD-1"}
 
 
@@ -1272,15 +1271,19 @@ async def test_query_spending_dispatches_get_award():
 async def test_query_spending_dispatches_spending_by_agency():
     client = AsyncMock()
     client.spending_by_agency.return_value = {"total_obligations": 4200000}
-    result = await _query_spending_impl(client, action="spending_by_agency", toptier_code="068", fiscal_year=2026)
+    download_client = AsyncMock()
+    result = await _query_spending_impl(
+        client, download_client, action="spending_by_agency", toptier_code="068", fiscal_year=2026,
+    )
     assert result == {"total_obligations": 4200000}
 
 
 @pytest.mark.asyncio
 async def test_query_spending_unsupported_action_raises():
     client = AsyncMock()
+    download_client = AsyncMock()
     with pytest.raises(ValueError, match="unsupported action"):
-        await _query_spending_impl(client, action="delete_everything", toptier_code="068")
+        await _query_spending_impl(client, download_client, action="delete_everything", toptier_code="068")
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -1308,16 +1311,18 @@ POLL_INTERVAL_SECONDS = 2
 
 async def _query_spending_impl(
     client: USASpendingClient,
+    download_client: USASpendingDownloadClient,
     *,
     action: str,
-    toptier_code: str,
+    toptier_code: str | None = None,
     start_date: str | None = None,
     end_date: str | None = None,
     award_id: str | None = None,
     fiscal_year: int | None = None,
+    job_id: str | None = None,
 ) -> dict:
     if action == "search_awards":
-        if not (start_date and end_date):
+        if not (toptier_code and start_date and end_date):
             raise ValueError("start_date and end_date are required for action='search_awards'")
         return await client.search_awards(toptier_code=toptier_code, start_date=start_date, end_date=end_date)
     if action == "get_award":
@@ -1325,12 +1330,22 @@ async def _query_spending_impl(
             raise ValueError("award_id is required for action='get_award'")
         return await client.get_award(award_id)
     if action == "spending_by_agency":
-        if not fiscal_year:
+        if not (toptier_code and fiscal_year):
             raise ValueError("fiscal_year is required for action='spending_by_agency'")
         return await client.spending_by_agency(toptier_code=toptier_code, fiscal_year=fiscal_year)
+    if action == "submit_bulk_download":
+        if not (toptier_code and start_date and end_date):
+            raise ValueError("toptier_code, start_date and end_date are required for action='submit_bulk_download'")
+        return await _submit_spending_query_impl(
+            download_client, toptier_code=toptier_code, start_date=start_date, end_date=end_date,
+        )
+    if action == "get_bulk_download_result":
+        if not job_id:
+            raise ValueError("job_id is required for action='get_bulk_download_result'")
+        return await _get_spending_result_impl(download_client, job_id=job_id)
     raise ValueError(
-        f"unsupported action: {action!r}. "
-        "Supported actions: 'search_awards', 'get_award', 'spending_by_agency'."
+        f"unsupported action: {action!r}. Supported actions: 'search_awards', 'get_award', "
+        "'spending_by_agency', 'submit_bulk_download', 'get_bulk_download_result'."
     )
 ```
 
@@ -1340,13 +1355,16 @@ async def _query_spending_impl(
 pytest tests/test_usaspending_server.py -v -k query_spending
 ```
 
-Expected: PASS (5 tests). `submit`/`get_spending_result` tests still fail to collect — that's expected until Step 5.
+Expected: PASS (5 tests). `_query_spending_impl`'s `submit_bulk_download`/`get_bulk_download_result` branches call `_submit_spending_query_impl`/`_get_spending_result_impl`, which don't exist yet — but Python doesn't resolve names inside a function body until that branch actually runs, and none of these five tests reach those branches, so this passes cleanly.
 
 - [ ] **Step 5: Write the failing tests for the async submit/poll pair**
 
 Append to `tests/test_usaspending_server.py`:
 
 ```python
+from civicpilot.servers.usaspending_server import _get_spending_result_impl, _submit_spending_query_impl
+
+
 @pytest.mark.asyncio
 async def test_submit_returns_complete_when_job_finishes_within_window():
     download_client = AsyncMock()
@@ -1411,6 +1429,28 @@ async def test_get_spending_result_returns_pending():
     download_client.poll_status.return_value = {"status": "running"}
     result = await _get_spending_result_impl(download_client, job_id="job-5")
     assert result == {"status": "pending", "job_id": "job-5"}
+
+
+@pytest.mark.asyncio
+async def test_query_spending_dispatches_submit_bulk_download():
+    client = AsyncMock()
+    download_client = AsyncMock()
+    download_client.submit_bulk_download.return_value = {"file_name": "job-6"}
+    download_client.poll_status.return_value = {"status": "finished", "file_url": "https://example/job-6.csv"}
+    result = await _query_spending_impl(
+        client, download_client, action="submit_bulk_download",
+        toptier_code="068", start_date="2026-01-01", end_date="2026-03-31",
+    )
+    assert result == {"status": "complete", "file_url": "https://example/job-6.csv", "job_id": "job-6"}
+
+
+@pytest.mark.asyncio
+async def test_query_spending_dispatches_get_bulk_download_result():
+    client = AsyncMock()
+    download_client = AsyncMock()
+    download_client.poll_status.return_value = {"status": "running"}
+    result = await _query_spending_impl(client, download_client, action="get_bulk_download_result", job_id="job-7")
+    assert result == {"status": "pending", "job_id": "job-7"}
 ```
 
 - [ ] **Step 6: Run tests to verify they fail**
@@ -1419,9 +1459,9 @@ async def test_get_spending_result_returns_pending():
 pytest tests/test_usaspending_server.py -v
 ```
 
-Expected: FAIL — `_submit_spending_query_impl` and `_get_spending_result_impl` not defined.
+Expected: FAIL — the new import line fails to collect (`_submit_spending_query_impl`/`_get_spending_result_impl` don't exist yet), so the whole file fails to collect.
 
-- [ ] **Step 7: Implement the async half and the `build_usaspending_server` factory**
+- [ ] **Step 7: Implement the async helpers and the `build_usaspending_server` factory**
 
 Append to `civicpilot/servers/usaspending_server.py`:
 
@@ -1468,34 +1508,23 @@ def build_usaspending_server(
 
     async def query_spending(
         action: str,
-        toptier_code: str,
+        toptier_code: str | None = None,
         start_date: str | None = None,
         end_date: str | None = None,
         award_id: str | None = None,
         fiscal_year: int | None = None,
+        job_id: str | None = None,
     ) -> dict:
-        """Query USAspending award data. action: 'search_awards', 'get_award', or 'spending_by_agency'."""
+        """Query USAspending data. action: 'search_awards', 'get_award', 'spending_by_agency',
+        'submit_bulk_download' (starts an award-list export, returns inline within ~8s or a job_id),
+        or 'get_bulk_download_result' (polls a job_id from a prior submit_bulk_download call)."""
         return await _query_spending_impl(
-            client, action=action, toptier_code=toptier_code, start_date=start_date,
-            end_date=end_date, award_id=award_id, fiscal_year=fiscal_year,
+            client, download_client, action=action, toptier_code=toptier_code, start_date=start_date,
+            end_date=end_date, award_id=award_id, fiscal_year=fiscal_year, job_id=job_id,
         )
-
-    async def submit_spending_query(toptier_code: str, start_date: str, end_date: str) -> dict:
-        """Submit a bulk spending download; returns inline if it completes within ~8s, otherwise a job_id to poll."""
-        return await _submit_spending_query_impl(
-            download_client, toptier_code=toptier_code, start_date=start_date, end_date=end_date,
-        )
-
-    async def get_spending_result(job_id: str) -> dict:
-        """Check the status of a previously submitted bulk spending download."""
-        return await _get_spending_result_impl(download_client, job_id=job_id)
 
     server.tool()(query_spending)
-    server.tool()(submit_spending_query)
-    server.tool()(get_spending_result)
     server._query_spending_impl = query_spending
-    server._submit_spending_query_impl = submit_spending_query
-    server._get_spending_result_impl = get_spending_result
     return server
 ```
 
@@ -1505,7 +1534,7 @@ def build_usaspending_server(
 pytest tests/test_usaspending_server.py -v
 ```
 
-Expected: PASS (10 tests).
+Expected: PASS (12 tests).
 
 - [ ] **Step 9: Commit**
 
@@ -1882,6 +1911,37 @@ async def test_uncited_claims_are_dropped_from_final_answer():
 
 
 @pytest.mark.asyncio
+async def test_orchestrator_can_dispatch_bulk_download_actions():
+    llm = AsyncMock()
+    tool_call_response = {
+        "choices": [{"message": {
+            "role": "assistant",
+            "tool_calls": [{
+                "id": "call_bulk",
+                "function": {"name": "query_usaspending", "arguments": json.dumps({
+                    "action": "submit_bulk_download", "agency_name": "Environmental Protection Agency",
+                    "start_date": "2026-01-01", "end_date": "2026-03-31",
+                })},
+            }],
+        }}],
+    }
+    final_response = {"choices": [{"message": {"role": "assistant", "content": "Export started [award:job-1]."}}]}
+    llm.chat.side_effect = [tool_call_response, final_response]
+
+    fr_impl = AsyncMock()
+    usaspending_impl = AsyncMock(return_value={"status": "pending", "job_id": "job-1"})
+    orchestrator = Orchestrator(llm, fr_impl, usaspending_impl, make_crosswalk(), DateResolver())
+
+    await orchestrator.handle_query("Export all EPA awards this quarter.", today=date(2026, 8, 13))
+
+    usaspending_impl.assert_awaited_once_with(
+        action="submit_bulk_download", toptier_code="068",
+        start_date="2026-01-01", end_date="2026-03-31",
+        award_id=None, fiscal_year=None, job_id=None,
+    )
+
+
+@pytest.mark.asyncio
 async def test_exhausting_tool_iteration_budget_asks_for_narrower_query():
     llm = AsyncMock()
     looping_response = {"choices": [{"message": {
@@ -1965,12 +2025,19 @@ USASPENDING_TOOL_SCHEMA = {
         "parameters": {
             "type": "object",
             "properties": {
-                "action": {"type": "string", "enum": ["search_awards", "get_award", "spending_by_agency"]},
+                "action": {
+                    "type": "string",
+                    "enum": [
+                        "search_awards", "get_award", "spending_by_agency",
+                        "submit_bulk_download", "get_bulk_download_result",
+                    ],
+                },
                 "agency_name": {"type": "string", "description": "Plain-language agency name"},
                 "start_date": {"type": "string", "description": "YYYY-MM-DD"},
                 "end_date": {"type": "string", "description": "YYYY-MM-DD"},
                 "award_id": {"type": "string"},
                 "fiscal_year": {"type": "integer"},
+                "job_id": {"type": "string", "description": "Returned by a prior submit_bulk_download call"},
             },
             "required": ["action"],
         },
@@ -2034,6 +2101,7 @@ class Orchestrator:
                 end_date=arguments.get("end_date"),
                 award_id=arguments.get("award_id"),
                 fiscal_year=arguments.get("fiscal_year"),
+                job_id=arguments.get("job_id"),
             )
         else:
             raise ValueError(f"unknown tool: {name!r}")
@@ -2101,7 +2169,7 @@ class Orchestrator:
 pytest tests/test_orchestrator.py -v
 ```
 
-Expected: PASS (6 tests).
+Expected: PASS (7 tests).
 
 - [ ] **Step 10: Commit**
 
