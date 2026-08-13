@@ -1,0 +1,14 @@
+[
+  {"name": "Environmental Protection Agency", "fr_slug": "environmental-protection-agency", "usaspending_toptier_code": "068"},
+  {"name": "Department of Health and Human Services", "fr_slug": "health-and-human-services-department", "usaspending_toptier_code": "075"},
+  {"name": "Department of Transportation", "fr_slug": "transportation-department", "usaspending_toptier_code": "069"},
+  {"name": "Department of Defense", "fr_slug": "defense-department", "usaspending_toptier_code": "097"},
+  {"name": "Department of Energy", "fr_slug": "energy-department", "usaspending_toptier_code": "089"},
+  {"name": "Department of Homeland Security", "fr_slug": "homeland-security-department", "usaspending_toptier_code": "070"},
+  {"name": "Department of Labor", "fr_slug": "labor-department", "usaspending_toptier_code": "016"},
+  {"name": "Department of Education", "fr_slug": "education-department", "usaspending_toptier_code": "091"},
+  {"name": "Department of Agriculture", "fr_slug": "agriculture-department", "usaspending_toptier_code": "012"},
+  {"name": "Department of Justice", "fr_slug": "justice-department", "usaspending_toptier_code": "015"},
+  {"name": "Department of the Treasury", "fr_slug": "treasury-department", "usaspending_toptier_code": "020"},
+  {"name": "Department of Veterans Affairs", "fr_slug": "veterans-affairs-department", "usaspending_toptier_code": "036"}
+]
