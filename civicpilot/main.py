@@ -3,8 +3,9 @@ import logging
 import os
 
 import httpx
+from dotenv import load_dotenv
 
-from .agent.llm_client import GroqClient
+from .agent.llm_client import FailoverLLMClient, GroqClient, OpenRouterClient
 from .agent.orchestrator import Orchestrator
 from .cache import QueryCache
 from .clients.fr_client import FederalRegisterClient
@@ -17,6 +18,7 @@ from .servers.usaspending_server import build_usaspending_server
 
 
 async def build_orchestrator() -> tuple[Orchestrator, httpx.AsyncClient]:
+    load_dotenv()
     api_key = os.environ.get("GROQ_API_KEY")
     if not api_key:
         print("GROQ_API_KEY environment variable is not set")
@@ -30,7 +32,16 @@ async def build_orchestrator() -> tuple[Orchestrator, httpx.AsyncClient]:
         USASpendingClient(http, cache), USASpendingDownloadClient(http),
     )
 
-    llm = GroqClient(http, api_key=api_key)
+    primary_llm = GroqClient(http, api_key=api_key)
+    fallback_api_key = os.environ.get("OPENROUTER_API_KEY")
+    if fallback_api_key:
+        llm = FailoverLLMClient(primary_llm, OpenRouterClient(http, api_key=fallback_api_key))
+    else:
+        logging.getLogger(__name__).warning(
+            "OPENROUTER_API_KEY not set — no fallback LLM configured; a Groq "
+            "outage or rate limit will fail the whole query."
+        )
+        llm = primary_llm
 
     orchestrator = Orchestrator(
         llm=llm,
