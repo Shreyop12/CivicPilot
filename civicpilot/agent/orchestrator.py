@@ -1,4 +1,5 @@
 import json
+import logging
 from dataclasses import dataclass, field
 from datetime import date
 
@@ -7,16 +8,23 @@ from ..date_resolver import DateResolver
 from .citation_guard import enforce_citations
 from .llm_client import GroqClient
 
+logger = logging.getLogger(__name__)
+
 MAX_TOOL_ITERATIONS = 5
 
-SYSTEM_PROMPT = (
+SYSTEM_PROMPT_TEMPLATE = (
     "You are CivicPilot, an assistant that answers questions about US federal "
     "rules and related government spending. Always call the provided tools to "
     "look up facts rather than relying on prior knowledge. When you give your "
     "final answer, cite every factual claim with the source's own identifier "
     "in square brackets, e.g. [doc:2026-12345] for a Federal Register document "
     "or [award:AWD-1] for a USAspending award. Never state a fact you cannot "
-    "cite this way."
+    "cite this way. Today's date is {today}. Federal Register uses calendar "
+    "dates; USAspending fiscal years run October 1 to September 30. Never "
+    "guess a date range — derive it from today's date. If a tool result "
+    "includes \"agency_match_verified\": false, you must state in your final "
+    "answer which agency name was actually matched rather than silently "
+    "trusting it."
 )
 
 FR_TOOL_SCHEMA = {
@@ -100,13 +108,28 @@ class Orchestrator:
         ):
             if phrase in lowered:
                 resolution = self._date_resolver.resolve(period, today)
-                if resolution.diverges:
-                    return phrase, resolution
+                return phrase, resolution
         return None
 
     async def _dispatch_tool_call(self, name: str, arguments: dict) -> dict:
         agency_name = arguments.get("agency_name")
         resolution = self._crosswalk.resolve(agency_name) if agency_name else None
+
+        if agency_name and resolution is not None:
+            if name == "search_federal_register" and resolution.fr_slug is None:
+                return {
+                    "error": (
+                        f"Could not resolve agency {agency_name!r} to a known agency; "
+                        "ask the user to confirm the official agency name."
+                    ),
+                }
+            if name == "query_usaspending" and resolution.usaspending_toptier_code is None:
+                return {
+                    "error": (
+                        f"Could not resolve agency {agency_name!r} to a known agency; "
+                        "ask the user to confirm the official agency name."
+                    ),
+                }
 
         if name == "search_federal_register":
             result = await self._fr_impl(
@@ -138,21 +161,31 @@ class Orchestrator:
         today = today or date.today()
 
         ambiguity = self._detect_ambiguous_period(user_query, today)
+        resolved_addendum = None
         if ambiguity is not None:
             phrase, resolution = ambiguity
-            return OrchestratorResult(
-                answer="",
-                needs_clarification=True,
-                clarification_question=(
-                    f"You said '{phrase}' — do you mean the calendar {resolution.period_label} "
-                    f"({resolution.calendar_range.start} to {resolution.calendar_range.end}) or the "
-                    f"federal fiscal {resolution.period_label} "
-                    f"({resolution.fiscal_range.start} to {resolution.fiscal_range.end})?"
-                ),
+            if resolution.diverges:
+                return OrchestratorResult(
+                    answer="",
+                    needs_clarification=True,
+                    clarification_question=(
+                        f"You said '{phrase}' — do you mean the calendar {resolution.period_label} "
+                        f"({resolution.calendar_range.start} to {resolution.calendar_range.end}) or the "
+                        f"federal fiscal {resolution.period_label} "
+                        f"({resolution.fiscal_range.start} to {resolution.fiscal_range.end})?"
+                    ),
+                )
+            resolved_addendum = (
+                f"The user said '{phrase}', which resolves to {resolution.calendar_range.start} "
+                f"through {resolution.calendar_range.end} — mention this range in your answer."
             )
 
+        system_prompt = SYSTEM_PROMPT_TEMPLATE.format(today=today.isoformat())
+        if resolved_addendum:
+            system_prompt = f"{system_prompt} {resolved_addendum}"
+
         messages: list[dict] = [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_query},
         ]
         tools = [FR_TOOL_SCHEMA, USASPENDING_TOOL_SCHEMA]
@@ -168,14 +201,25 @@ class Orchestrator:
 
             messages.append(message)
             for call in tool_calls:
-                fn = call["function"]
                 try:
+                    fn = call["function"]
                     arguments = json.loads(fn["arguments"])
                     result = await self._dispatch_tool_call(fn["name"], arguments)
                     content = json.dumps(result)
                 except Exception as exc:
+                    tool_name = call.get("function", {}).get("name", "<unknown>")
+                    logger.exception("Tool dispatch failed for tool %r", tool_name)
                     content = json.dumps({"error": str(exc)})
-                messages.append({"role": "tool", "tool_call_id": call["id"], "content": content})
+                messages.append({"role": "tool", "tool_call_id": call.get("id"), "content": content})
+
+        # Tool-call budget exhausted. Give the model one last chance to answer
+        # from whatever it already gathered, instead of discarding it outright.
+        final_response = await self._llm.chat(messages, tools=None)
+        final_message = final_response["choices"][0]["message"]
+        raw_answer = final_message.get("content") or ""
+        filtered_answer, dropped = enforce_citations(raw_answer)
+        if filtered_answer.strip():
+            return OrchestratorResult(answer=filtered_answer, dropped_claims=dropped)
 
         return OrchestratorResult(
             answer="",

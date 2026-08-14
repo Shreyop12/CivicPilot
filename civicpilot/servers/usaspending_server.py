@@ -10,6 +10,20 @@ MAX_POLL_WINDOW_SECONDS = 8
 POLL_INTERVAL_SECONDS = 2
 
 
+def _missing_fields_message(action: str, **fields: object) -> str:
+    """Builds an error message naming exactly which required fields were
+    falsy, so a caller (e.g. an unresolved agency leaving toptier_code=None)
+    gets an accurate message instead of one that always blames the dates.
+    """
+    missing = [field_name for field_name, value in fields.items() if not value]
+    if len(missing) == 1:
+        joined = missing[0]
+    else:
+        joined = ", ".join(missing[:-1]) + " and " + missing[-1]
+    verb = "is" if len(missing) == 1 else "are"
+    return f"{joined} {verb} required for action='{action}'"
+
+
 async def _query_spending_impl(
     client: USASpendingClient,
     download_client: USASpendingDownloadClient,
@@ -24,7 +38,9 @@ async def _query_spending_impl(
 ) -> dict:
     if action == "search_awards":
         if not (toptier_code and start_date and end_date):
-            raise ValueError("start_date and end_date are required for action='search_awards'")
+            raise ValueError(_missing_fields_message(
+                "search_awards", toptier_code=toptier_code, start_date=start_date, end_date=end_date,
+            ))
         return await client.search_awards(toptier_code=toptier_code, start_date=start_date, end_date=end_date)
     if action == "get_award":
         if not award_id:
@@ -32,7 +48,9 @@ async def _query_spending_impl(
         return await client.get_award(award_id)
     if action == "spending_by_agency":
         if not (toptier_code and fiscal_year):
-            raise ValueError("fiscal_year is required for action='spending_by_agency'")
+            raise ValueError(_missing_fields_message(
+                "spending_by_agency", toptier_code=toptier_code, fiscal_year=fiscal_year,
+            ))
         return await client.spending_by_agency(toptier_code=toptier_code, fiscal_year=fiscal_year)
     if action == "submit_bulk_download":
         if not (toptier_code and start_date and end_date):

@@ -94,3 +94,7 @@ async def test_flagship_query_returns_cited_answer_from_both_sources():
     assert fr_route.called
     assert usa_route.called
     assert result.dropped_claims == []
+
+    fr_params = fr_route.calls.last.request.url.params
+    assert fr_params["conditions[agencies][]"] == "environmental-protection-agency"
+    assert fr_params["conditions[type][]"] == "PRORULE"

@@ -15,6 +15,9 @@ dev = [
     "respx>=0.21",
 ]
 
+[project.scripts]
+civicpilot = "civicpilot.main:run"
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 

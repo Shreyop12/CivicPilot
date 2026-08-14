@@ -177,4 +177,4 @@ async def test_exhausting_tool_iteration_budget_asks_for_narrower_query():
     result = await orchestrator.handle_query("Tell me everything about everything.", today=date(2026, 8, 13))
 
     assert result.needs_clarification is True
-    assert llm.chat.await_count == MAX_TOOL_ITERATIONS
+    assert llm.chat.await_count == MAX_TOOL_ITERATIONS + 1

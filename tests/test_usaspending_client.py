@@ -47,13 +47,14 @@ async def test_get_award_returns_parsed_json():
 @pytest.mark.asyncio
 @respx.mock
 async def test_spending_by_agency_returns_parsed_json():
-    respx.get(f"{USASPENDING_BASE_URL}/agency/068/awards/").mock(
+    route = respx.get(f"{USASPENDING_BASE_URL}/agency/068/awards/").mock(
         return_value=httpx.Response(200, json={"toptier_code": "068", "total_obligations": 4200000})
     )
     async with httpx.AsyncClient() as http:
         client = USASpendingClient(http, QueryCache())
         result = await client.spending_by_agency(toptier_code="068", fiscal_year=2026)
     assert result["total_obligations"] == 4200000
+    assert route.calls.last.request.url.params["fiscal_year"] == "2026"
 
 
 @pytest.mark.asyncio
