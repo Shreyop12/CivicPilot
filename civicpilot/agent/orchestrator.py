@@ -1,0 +1,188 @@
+import json
+from dataclasses import dataclass, field
+from datetime import date
+
+from ..crosswalk import AgencyCrosswalk
+from ..date_resolver import DateResolver
+from .citation_guard import enforce_citations
+from .llm_client import GroqClient
+
+MAX_TOOL_ITERATIONS = 5
+
+SYSTEM_PROMPT = (
+    "You are CivicPilot, an assistant that answers questions about US federal "
+    "rules and related government spending. Always call the provided tools to "
+    "look up facts rather than relying on prior knowledge. When you give your "
+    "final answer, cite every factual claim with the source's own identifier "
+    "in square brackets, e.g. [doc:2026-12345] for a Federal Register document "
+    "or [award:AWD-1] for a USAspending award. Never state a fact you cannot "
+    "cite this way."
+)
+
+FR_TOOL_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "search_federal_register",
+        "description": "Search or fetch Federal Register documents (proposed/final rules).",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["search", "get"]},
+                "agency_name": {
+                    "type": "string",
+                    "description": "Plain-language agency name, e.g. 'Environmental Protection Agency'",
+                },
+                "doc_type": {"type": "string", "enum": ["RULE", "PROPOSED_RULE"]},
+                "start_date": {"type": "string", "description": "YYYY-MM-DD"},
+                "end_date": {"type": "string", "description": "YYYY-MM-DD"},
+                "document_number": {"type": "string"},
+            },
+            "required": ["action"],
+        },
+    },
+}
+
+USASPENDING_TOOL_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "query_usaspending",
+        "description": "Query USAspending award/spending data for a federal agency.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": [
+                        "search_awards", "get_award", "spending_by_agency",
+                        "submit_bulk_download", "get_bulk_download_result",
+                    ],
+                },
+                "agency_name": {"type": "string", "description": "Plain-language agency name"},
+                "start_date": {"type": "string", "description": "YYYY-MM-DD"},
+                "end_date": {"type": "string", "description": "YYYY-MM-DD"},
+                "award_id": {"type": "string"},
+                "fiscal_year": {"type": "integer"},
+                "job_id": {"type": "string", "description": "Returned by a prior submit_bulk_download call"},
+            },
+            "required": ["action"],
+        },
+    },
+}
+
+
+@dataclass
+class OrchestratorResult:
+    answer: str
+    dropped_claims: list[str] = field(default_factory=list)
+    needs_clarification: bool = False
+    clarification_question: str | None = None
+
+
+class Orchestrator:
+    def __init__(
+        self,
+        llm: GroqClient,
+        fr_impl,
+        usaspending_impl,
+        crosswalk: AgencyCrosswalk,
+        date_resolver: DateResolver,
+    ):
+        self._llm = llm
+        self._fr_impl = fr_impl
+        self._usaspending_impl = usaspending_impl
+        self._crosswalk = crosswalk
+        self._date_resolver = date_resolver
+
+    def _detect_ambiguous_period(self, query: str, today: date):
+        lowered = query.lower()
+        for phrase, period in (
+            ("this quarter", "quarter"), ("this year", "year"),
+            ("last quarter", "quarter"), ("last year", "year"),
+        ):
+            if phrase in lowered:
+                resolution = self._date_resolver.resolve(period, today)
+                if resolution.diverges:
+                    return phrase, resolution
+        return None
+
+    async def _dispatch_tool_call(self, name: str, arguments: dict) -> dict:
+        agency_name = arguments.get("agency_name")
+        resolution = self._crosswalk.resolve(agency_name) if agency_name else None
+
+        if name == "search_federal_register":
+            result = await self._fr_impl(
+                action=arguments["action"],
+                agency_slug=resolution.fr_slug if resolution else None,
+                doc_type=arguments.get("doc_type"),
+                start_date=arguments.get("start_date"),
+                end_date=arguments.get("end_date"),
+                document_number=arguments.get("document_number"),
+            )
+        elif name == "query_usaspending":
+            result = await self._usaspending_impl(
+                action=arguments["action"],
+                toptier_code=resolution.usaspending_toptier_code if resolution else None,
+                start_date=arguments.get("start_date"),
+                end_date=arguments.get("end_date"),
+                award_id=arguments.get("award_id"),
+                fiscal_year=arguments.get("fiscal_year"),
+                job_id=arguments.get("job_id"),
+            )
+        else:
+            raise ValueError(f"unknown tool: {name!r}")
+
+        if resolution is not None and not resolution.verified:
+            result = {**result, "agency_match_verified": False, "agency_match_used": resolution.matched_name}
+        return result
+
+    async def handle_query(self, user_query: str, today: date | None = None) -> OrchestratorResult:
+        today = today or date.today()
+
+        ambiguity = self._detect_ambiguous_period(user_query, today)
+        if ambiguity is not None:
+            phrase, resolution = ambiguity
+            return OrchestratorResult(
+                answer="",
+                needs_clarification=True,
+                clarification_question=(
+                    f"You said '{phrase}' — do you mean the calendar {resolution.period_label} "
+                    f"({resolution.calendar_range.start} to {resolution.calendar_range.end}) or the "
+                    f"federal fiscal {resolution.period_label} "
+                    f"({resolution.fiscal_range.start} to {resolution.fiscal_range.end})?"
+                ),
+            )
+
+        messages: list[dict] = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": user_query},
+        ]
+        tools = [FR_TOOL_SCHEMA, USASPENDING_TOOL_SCHEMA]
+
+        for _ in range(MAX_TOOL_ITERATIONS):
+            response = await self._llm.chat(messages, tools=tools)
+            message = response["choices"][0]["message"]
+            tool_calls = message.get("tool_calls") or []
+            if not tool_calls:
+                raw_answer = message.get("content") or ""
+                filtered_answer, dropped = enforce_citations(raw_answer)
+                return OrchestratorResult(answer=filtered_answer, dropped_claims=dropped)
+
+            messages.append(message)
+            for call in tool_calls:
+                fn = call["function"]
+                arguments = json.loads(fn["arguments"])
+                try:
+                    result = await self._dispatch_tool_call(fn["name"], arguments)
+                    content = json.dumps(result)
+                except ValueError as exc:
+                    content = json.dumps({"error": str(exc)})
+                messages.append({"role": "tool", "tool_call_id": call["id"], "content": content})
+
+        return OrchestratorResult(
+            answer="",
+            needs_clarification=True,
+            clarification_question=(
+                "I couldn't complete this query within the available tool-call budget "
+                "— could you narrow it down?"
+            ),
+        )
