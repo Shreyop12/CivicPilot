@@ -19,13 +19,13 @@ from civicpilot.servers.usaspending_server import build_usaspending_server
 @pytest.mark.asyncio
 @respx.mock
 async def test_flagship_query_returns_cited_answer_from_both_sources():
-    respx.get(f"{FR_BASE_URL}/documents.json").mock(
+    fr_route = respx.get(f"{FR_BASE_URL}/documents.json").mock(
         return_value=httpx.Response(200, json={
             "count": 1,
             "results": [{"document_number": "2026-12345", "title": "Emissions Reporting Rule"}],
         })
     )
-    respx.get(f"{USASPENDING_BASE_URL}/agency/068/awards/").mock(
+    usa_route = respx.get(f"{USASPENDING_BASE_URL}/agency/068/awards/").mock(
         return_value=httpx.Response(200, json={"toptier_code": "068", "total_obligations": 4200000})
     )
 
@@ -91,3 +91,6 @@ async def test_flagship_query_returns_cited_answer_from_both_sources():
     assert "[doc:2026-12345]" in result.answer
     assert "[award:agency-068-fy2026]" in result.answer
     assert result.needs_clarification is False
+    assert fr_route.called
+    assert usa_route.called
+    assert result.dropped_claims == []
