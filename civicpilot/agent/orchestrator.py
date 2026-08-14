@@ -32,7 +32,7 @@ FR_TOOL_SCHEMA = {
                     "type": "string",
                     "description": "Plain-language agency name, e.g. 'Environmental Protection Agency'",
                 },
-                "doc_type": {"type": "string", "enum": ["RULE", "PROPOSED_RULE"]},
+                "doc_type": {"type": "string", "enum": ["RULE", "PRORULE"]},
                 "start_date": {"type": "string", "description": "YYYY-MM-DD"},
                 "end_date": {"type": "string", "description": "YYYY-MM-DD"},
                 "document_number": {"type": "string"},
@@ -97,7 +97,6 @@ class Orchestrator:
         lowered = query.lower()
         for phrase, period in (
             ("this quarter", "quarter"), ("this year", "year"),
-            ("last quarter", "quarter"), ("last year", "year"),
         ):
             if phrase in lowered:
                 resolution = self._date_resolver.resolve(period, today)
@@ -170,11 +169,11 @@ class Orchestrator:
             messages.append(message)
             for call in tool_calls:
                 fn = call["function"]
-                arguments = json.loads(fn["arguments"])
                 try:
+                    arguments = json.loads(fn["arguments"])
                     result = await self._dispatch_tool_call(fn["name"], arguments)
                     content = json.dumps(result)
-                except ValueError as exc:
+                except Exception as exc:
                     content = json.dumps({"error": str(exc)})
                 messages.append({"role": "tool", "tool_call_id": call["id"], "content": content})
 
