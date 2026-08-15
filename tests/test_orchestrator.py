@@ -178,3 +178,26 @@ async def test_exhausting_tool_iteration_budget_asks_for_narrower_query():
 
     assert result.needs_clarification is True
     assert llm.chat.await_count == MAX_TOOL_ITERATIONS + 1
+
+
+@pytest.mark.asyncio
+async def test_handle_query_inserts_history_between_system_and_new_user_message():
+    llm = AsyncMock()
+    llm.chat.return_value = {"choices": [{"message": {"role": "assistant", "content": "Fine [doc:1]."}}]}
+    fr_impl = AsyncMock()
+    usaspending_impl = AsyncMock()
+    orchestrator = Orchestrator(llm, fr_impl, usaspending_impl, make_crosswalk(), DateResolver())
+    prior_history = [
+        {"role": "user", "content": "What did EPA spend last period?"},
+        {"role": "assistant", "content": "EPA spent $1B [award:1]."},
+    ]
+
+    await orchestrator.handle_query(
+        "Are there any newer rules?", today=date(2026, 8, 13), history=prior_history,
+    )
+
+    sent_messages = llm.chat.call_args.args[0]
+    assert sent_messages[0]["role"] == "system"
+    assert sent_messages[1] == prior_history[0]
+    assert sent_messages[2] == prior_history[1]
+    assert sent_messages[3] == {"role": "user", "content": "Are there any newer rules?"}

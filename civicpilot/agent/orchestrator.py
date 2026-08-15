@@ -157,7 +157,9 @@ class Orchestrator:
             result = {**result, "agency_match_verified": False, "agency_match_used": resolution.matched_name}
         return result
 
-    async def handle_query(self, user_query: str, today: date | None = None) -> OrchestratorResult:
+    async def handle_query(
+        self, user_query: str, today: date | None = None, history: list[dict] | None = None,
+    ) -> OrchestratorResult:
         today = today or date.today()
 
         ambiguity = self._detect_ambiguous_period(user_query, today)
@@ -184,10 +186,10 @@ class Orchestrator:
         if resolved_addendum:
             system_prompt = f"{system_prompt} {resolved_addendum}"
 
-        messages: list[dict] = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_query},
-        ]
+        messages: list[dict] = [{"role": "system", "content": system_prompt}]
+        if history:
+            messages.extend(history)
+        messages.append({"role": "user", "content": user_query})
         tools = [FR_TOOL_SCHEMA, USASPENDING_TOOL_SCHEMA]
 
         for _ in range(MAX_TOOL_ITERATIONS):
