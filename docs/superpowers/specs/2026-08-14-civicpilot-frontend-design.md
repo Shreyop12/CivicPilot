@@ -128,10 +128,15 @@ per-turn token cost close to today's single-query cost regardless of conversatio
 - **Partial fiscal year:** the current (in-progress) FY's bar in the obligations chart is visually
   distinguished (reduced opacity, as in the mockup) and labeled "(partial)" — it isn't a full-year
   figure and presenting it identically to closed years would misrepresent the trend.
-- **Citation stamp clicks:** a `[doc:...]` stamp links out to that document's `html_url` (already
-  present in the FR search result) in a new tab. A `[award:...]` stamp from `spending_by_agency`
-  is *not* clickable — that endpoint returns an agency-level aggregate, not a per-award record with
-  its own URL, so there's nothing to link to. It renders as a stamp without a hover/click affordance.
+- **Citation stamp clicks:** in the **dashboard's rules list**, a `[doc:...]` stamp links out to
+  that document's `html_url` (already present in the FR search result) in a new tab. A
+  `[award:...]` stamp from `spending_by_agency` is *not* clickable — that endpoint returns an
+  agency-level aggregate, not a per-award record with its own URL, so there's nothing to link to.
+  In the **chat panel**, citation stamps are parsed out of the model's plain-text answer
+  (`[doc:2026-12345]`), which carries only the citation ID, not a URL — chat-rendered stamps are
+  therefore never clickable, dashboard or not. Making chat citations clickable would require the
+  chat endpoint to additionally return an ID→URL map built from that turn's tool results, which is
+  out of scope for v1.
 
 ## Testing
 
