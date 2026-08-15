@@ -6,3 +6,6 @@ __pycache__/
 civicpilot.egg-info/
 .env
 .superpowers/
+frontend/node_modules/
+frontend/dist/
+frontend/.env
