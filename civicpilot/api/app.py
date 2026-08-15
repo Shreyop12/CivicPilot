@@ -1,0 +1,38 @@
+import os
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+from ..main import build_orchestrator
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    components = await build_orchestrator()
+    app.state.components = components
+    app.state.conversations = {}
+    try:
+        yield
+    finally:
+        await components.http.aclose()
+
+
+def create_app() -> FastAPI:
+    app = FastAPI(lifespan=lifespan)
+    cors_origin = os.environ.get("CORS_ORIGIN", "http://localhost:5173")
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=[cors_origin],
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    @app.get("/api/health")
+    async def health() -> dict:
+        return {"status": "ok"}
+
+    return app
+
+
+app = create_app()

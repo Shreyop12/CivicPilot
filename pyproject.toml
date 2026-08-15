@@ -7,6 +7,8 @@ dependencies = [
     "mcp>=1.0,<2.0",
     "rapidfuzz>=3.9",
     "python-dotenv>=1.0",
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
 ]
 
 [project.optional-dependencies]
