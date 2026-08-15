@@ -1,6 +1,8 @@
 import asyncio
 import logging
 import os
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 
 import httpx
 from dotenv import load_dotenv
@@ -11,13 +13,22 @@ from .cache import QueryCache
 from .clients.fr_client import FederalRegisterClient
 from .clients.usaspending_client import USASpendingClient
 from .clients.usaspending_download_client import USASpendingDownloadClient
-from .crosswalk import load_default_crosswalk
+from .crosswalk import AgencyCrosswalk, load_default_crosswalk
 from .date_resolver import DateResolver
 from .servers.fr_server import build_fr_server
 from .servers.usaspending_server import build_usaspending_server
 
 
-async def build_orchestrator() -> tuple[Orchestrator, httpx.AsyncClient]:
+@dataclass
+class AppComponents:
+    orchestrator: Orchestrator
+    http: httpx.AsyncClient
+    fr_impl: Callable[..., Awaitable[dict]]
+    usaspending_impl: Callable[..., Awaitable[dict]]
+    crosswalk: AgencyCrosswalk
+
+
+async def build_orchestrator() -> AppComponents:
     load_dotenv()
     api_key = os.environ.get("GROQ_API_KEY")
     if not api_key:
@@ -43,28 +54,35 @@ async def build_orchestrator() -> tuple[Orchestrator, httpx.AsyncClient]:
         )
         llm = primary_llm
 
+    crosswalk = load_default_crosswalk()
     orchestrator = Orchestrator(
         llm=llm,
         fr_impl=fr_server._search_documents_impl,
         usaspending_impl=usaspending_server._query_spending_impl,
-        crosswalk=load_default_crosswalk(),
+        crosswalk=crosswalk,
         date_resolver=DateResolver(),
     )
-    return orchestrator, http
+    return AppComponents(
+        orchestrator=orchestrator,
+        http=http,
+        fr_impl=fr_server._search_documents_impl,
+        usaspending_impl=usaspending_server._query_spending_impl,
+        crosswalk=crosswalk,
+    )
 
 
 async def main() -> None:
     logging.basicConfig(level=logging.INFO)
-    orchestrator, http = await build_orchestrator()
+    components = await build_orchestrator()
     try:
         query = input("Ask CivicPilot: ")
-        result = await orchestrator.handle_query(query)
+        result = await components.orchestrator.handle_query(query)
         if result.needs_clarification:
             print(result.clarification_question)
         else:
             print(result.answer)
     finally:
-        await http.aclose()
+        await components.http.aclose()
 
 
 def run() -> None:
