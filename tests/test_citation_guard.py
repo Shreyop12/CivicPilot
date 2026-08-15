@@ -32,3 +32,21 @@ def test_enforce_citations_keeps_short_lead_ins():
     assert "Here's a summary." in kept
     assert "[doc:2026-1]" in kept
     assert dropped == []
+
+
+def test_enforce_citations_drops_short_uncited_factual_claims():
+    """A short factual sentence with no citation must be dropped like any
+    other uncited claim — length alone isn't evidence it's a connective
+    lead-in rather than a claim. Regression case: 'No mismatch was detected.'
+    (26 chars) survived as the entire answer on a live run because it fell
+    under the length threshold while the real (longer) uncited claims around
+    it were correctly dropped.
+    """
+    text = (
+        "The EPA proposed a new rule [doc:2026-12345]. "
+        "No mismatch was detected."
+    )
+    kept, dropped = enforce_citations(text)
+    assert "[doc:2026-12345]" in kept
+    assert "No mismatch was detected." not in kept
+    assert "No mismatch was detected." in dropped

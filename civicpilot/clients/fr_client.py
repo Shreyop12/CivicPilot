@@ -4,6 +4,14 @@ from ..cache import QueryCache
 
 FR_BASE_URL = "https://www.federalregister.gov/api/v1"
 
+# The FR API's default document representation includes abstract/excerpts/
+# extra URL fields that push a 20-result search to ~39KB (~10K tokens) — on
+# its own most of Groq's 12K TPM budget. Scope to what the orchestrator
+# actually consumes: document_number for citations, title/type/publication_date
+# for describing the rule, agencies for the agency-match-verified check, and
+# html_url as the citable link.
+SEARCH_FIELDS = ["document_number", "title", "type", "publication_date", "agencies", "html_url"]
+
 
 class FederalRegisterClient:
     def __init__(self, http_client: httpx.AsyncClient, cache: QueryCache):
@@ -27,7 +35,7 @@ class FederalRegisterClient:
         if cached is not None:
             return cached
 
-        params: dict[str, object] = {"per_page": per_page}
+        params: dict[str, object] = {"per_page": per_page, "fields[]": SEARCH_FIELDS}
         if agency_slug:
             params["conditions[agencies][]"] = agency_slug
         if doc_type:
