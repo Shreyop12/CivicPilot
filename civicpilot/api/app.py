@@ -5,6 +5,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from ..main import build_orchestrator
+from .routes.agencies import router as agencies_router
 
 
 @asynccontextmanager
@@ -31,6 +32,8 @@ def create_app() -> FastAPI:
     @app.get("/api/health")
     async def health() -> dict:
         return {"status": "ok"}
+
+    app.include_router(agencies_router, prefix="/api")
 
     return app
 
