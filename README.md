@@ -49,6 +49,17 @@ or, without the console script:
 python -m civicpilot.main
 ```
 
+## Run the API
+
+The frontend (see `frontend/README.md`) talks to a FastAPI backend:
+
+```
+uvicorn civicpilot.api.app:app --reload --port 8000
+```
+
+Set `CORS_ORIGIN` in `.env` if the frontend isn't running on the Vite default
+(`http://localhost:5173`).
+
 ## Tests
 
 ```
