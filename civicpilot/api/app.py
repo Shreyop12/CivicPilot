@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from ..main import build_orchestrator
 from .routes.agencies import router as agencies_router
+from .routes.chat import router as chat_router
 
 
 @asynccontextmanager
@@ -34,6 +35,7 @@ def create_app() -> FastAPI:
         return {"status": "ok"}
 
     app.include_router(agencies_router, prefix="/api")
+    app.include_router(chat_router, prefix="/api")
 
     return app
 
