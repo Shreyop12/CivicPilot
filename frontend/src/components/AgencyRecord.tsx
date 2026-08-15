@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Bar, BarChart, ResponsiveContainer, XAxis, YAxis } from "recharts";
+import { Bar, BarChart, Cell, ResponsiveContainer, XAxis, YAxis } from "recharts";
 import { fetchDashboard } from "../api/client";
 import type { AgencyDashboard } from "../api/types";
 import { buildChartData } from "./chartData";
@@ -17,21 +17,22 @@ type LoadState =
 
 export function AgencyRecord({ toptierCode }: AgencyRecordProps) {
   const [state, setState] = useState<LoadState>({ status: "loading" });
+  const [retryCount, setRetryCount] = useState(0);
 
-  const load = () => {
+  useEffect(() => {
+    let cancelled = false;
     setState({ status: "loading" });
     fetchDashboard(toptierCode)
       .then((dashboard) => {
-        setState({ status: "ready", dashboard });
+        if (!cancelled) setState({ status: "ready", dashboard });
       })
       .catch(() => {
-        setState({ status: "error" });
+        if (!cancelled) setState({ status: "error" });
       });
-  };
-
-  useEffect(() => {
-    load();
-  }, [toptierCode]);
+    return () => {
+      cancelled = true;
+    };
+  }, [toptierCode, retryCount]);
 
   if (state.status === "loading") {
     return <div className="p-6 text-sm text-muted">Loading…</div>;
@@ -41,7 +42,7 @@ export function AgencyRecord({ toptierCode }: AgencyRecordProps) {
     return (
       <div className="p-6 text-sm text-muted">
         <p>Couldn't load this agency's data.</p>
-        <Button variant="outline" size="sm" className="mt-2" onClick={() => load()}>
+        <Button variant="outline" size="sm" className="mt-2" onClick={() => setRetryCount((c) => c + 1)}>
           Retry
         </Button>
       </div>
@@ -70,7 +71,11 @@ export function AgencyRecord({ toptierCode }: AgencyRecordProps) {
           <BarChart data={chartData}>
             <XAxis dataKey="fiscalYear" fontSize={10} />
             <YAxis hide />
-            <Bar dataKey="amount" fill="#1D2A54" radius={[2, 2, 0, 0]} />
+            <Bar dataKey="amount" radius={[2, 2, 0, 0]}>
+              {chartData.map((point) => (
+                <Cell key={point.fiscalYear} fill="#1D2A54" fillOpacity={point.partial ? 0.6 : 1} />
+              ))}
+            </Bar>
           </BarChart>
         </ResponsiveContainer>
       )}

@@ -10,9 +10,9 @@ describe("buildChartData", () => {
     ]);
 
     expect(result).toEqual([
-      { fiscalYear: "FY2024", amount: 100 },
-      { fiscalYear: "FY2025", amount: 200 },
-      { fiscalYear: "FY2026 (partial)", amount: 50 },
+      { fiscalYear: "FY2024", amount: 100, partial: false },
+      { fiscalYear: "FY2025", amount: 200, partial: false },
+      { fiscalYear: "FY2026 (partial)", amount: 50, partial: true },
     ]);
   });
 });
