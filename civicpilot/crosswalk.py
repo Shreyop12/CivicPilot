@@ -56,6 +56,9 @@ class AgencyCrosswalk:
             verified=False,
         )
 
+    def list_all(self) -> list[AgencyMapping]:
+        return list(self._by_name.values())
+
 
 def load_default_crosswalk(path: Path = DEFAULT_CROSSWALK_PATH) -> AgencyCrosswalk:
     raw = json.loads(path.read_text())

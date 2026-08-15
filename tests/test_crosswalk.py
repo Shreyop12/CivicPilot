@@ -41,3 +41,14 @@ def test_load_default_crosswalk_resolves_epa():
     res = cw.resolve("Environmental Protection Agency")
     assert res.verified is True
     assert res.usaspending_toptier_code == "068"
+
+
+def test_list_all_returns_every_mapping():
+    crosswalk = AgencyCrosswalk([
+        AgencyMapping("Environmental Protection Agency", "environmental-protection-agency", "068"),
+        AgencyMapping("Department of Energy", "energy-department", "089"),
+    ])
+
+    result = crosswalk.list_all()
+
+    assert {m.name for m in result} == {"Environmental Protection Agency", "Department of Energy"}
