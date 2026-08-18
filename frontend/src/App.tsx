@@ -29,19 +29,19 @@ export function App() {
 
   return (
     <div className="flex h-screen flex-col bg-paper text-ink md:flex-row">
-      <div className="flex items-center justify-between border-b border-hairline bg-card p-3 md:hidden">
+      <div className="flex items-center justify-between border-b border-hairline bg-card p-3 lg:hidden">
         <Button variant="outline" size="sm" onClick={() => setRailOpen(true)}>
           Agencies
         </Button>
         <span className="font-serif text-sm">{selected?.name ?? "CivicPilot"}</span>
-        <Button variant="outline" size="sm" onClick={() => setChatOpen(true)}>
+        <Button variant="outline" size="sm" className="md:hidden" onClick={() => setChatOpen(true)}>
           Ask
         </Button>
       </div>
 
-      <div className={`${railOpen ? "fixed inset-0 z-20 bg-paper" : "hidden"} md:relative md:z-auto md:block`}>
+      <div className={`${railOpen ? "fixed inset-0 z-20 bg-paper" : "hidden"} lg:relative lg:z-auto lg:block`}>
         {railOpen && (
-          <Button variant="outline" size="sm" className="m-2 md:hidden" onClick={() => setRailOpen(false)}>
+          <Button variant="outline" size="sm" className="m-2 lg:hidden" onClick={() => setRailOpen(false)}>
             Close
           </Button>
         )}
