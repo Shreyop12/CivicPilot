@@ -1,8 +1,13 @@
-from fastapi import APIRouter, Depends
+import logging
+
+import httpx
+from fastapi import APIRouter, Depends, HTTPException
 
 from ..deps import get_components, get_conversations
 from ..schemas import ChatRequest, ChatResponse
 from ...main import AppComponents
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -14,7 +19,11 @@ async def post_chat(
     conversations: dict = Depends(get_conversations),
 ) -> ChatResponse:
     prior_history = conversations.get(body.conversation_id, [])
-    result = await components.orchestrator.handle_query(body.message, history=prior_history)
+    try:
+        result = await components.orchestrator.handle_query(body.message, history=prior_history)
+    except (httpx.HTTPStatusError, httpx.RequestError):
+        logger.exception("handle_query failed — LLM providers unavailable")
+        raise HTTPException(status_code=503, detail="Answer generation is temporarily unavailable — try again.")
 
     assistant_content = result.clarification_question if result.needs_clarification else result.answer
     conversations[body.conversation_id] = prior_history + [

@@ -75,3 +75,35 @@ async def test_chat_passes_prior_history_and_appends_clarification_as_assistant_
 
     components.orchestrator.handle_query.assert_awaited_once_with("This year", history=prior)
     assert conversations["conv-2"][-1] == {"role": "assistant", "content": "Calendar or fiscal year?"}
+
+
+@pytest.mark.asyncio
+async def test_chat_returns_clean_503_when_llm_providers_are_unavailable():
+    """Regression case found live 2026-08-18: when both the primary and
+    fallback LLM providers fail for a request (e.g. Groq TPM-limited and the
+    OpenRouter fallback also upstream-rate-limited), handle_query raises
+    rather than returning an OrchestratorResult. Uncaught, that crashed the
+    route with a raw 500 and left conversation history unmodified but the
+    request state ambiguous. The route should catch it and return a clean,
+    loggable 503 instead of leaking an unhandled exception.
+    """
+    components = make_fake_components(None)
+    components.orchestrator.handle_query = AsyncMock(
+        side_effect=httpx.HTTPStatusError(
+            "429", request=httpx.Request("POST", "http://x"), response=httpx.Response(429),
+        )
+    )
+    conversations: dict = {}
+
+    app = create_app()
+    app.dependency_overrides[get_components] = lambda: components
+    app.dependency_overrides[get_conversations] = lambda: conversations
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/api/chat", json={"conversation_id": "conv-3", "message": "What is EPA?"},
+        )
+
+    assert response.status_code == 503
+    assert "conv-3" not in conversations
