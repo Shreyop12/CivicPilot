@@ -12,6 +12,13 @@ logger = logging.getLogger(__name__)
 
 MAX_TOOL_ITERATIONS = 5
 
+# The dashboard endpoint wants up to 20 rules for a full 12-month list, but
+# the chat agent only needs a couple of examples to ground a citation —
+# fetching 20 full document summaries per search call (title/html_url/
+# agencies each) is what actually pushed a two-search conversation over
+# Groq's TPM limit live, independent of the reasoning-trace fix above.
+CHAT_SEARCH_PAGE_SIZE = 5
+
 SYSTEM_PROMPT_TEMPLATE = (
     "You are CivicPilot, an assistant that answers questions about US federal "
     "rules and related government spending. Always call the provided tools to "
@@ -143,6 +150,7 @@ class Orchestrator:
                 start_date=arguments.get("start_date"),
                 end_date=arguments.get("end_date"),
                 document_number=arguments.get("document_number"),
+                per_page=CHAT_SEARCH_PAGE_SIZE,
             )
         elif name == "query_usaspending":
             result = await self._usaspending_impl(
@@ -202,6 +210,21 @@ class Orchestrator:
             tool_calls = message.get("tool_calls") or []
             if not tool_calls:
                 raw_answer = message.get("content") or ""
+                if not raw_answer.strip():
+                    # The model stopped calling tools but produced no content
+                    # at all — not "said something uncited that got dropped"
+                    # (that's a legitimate, if unhelpful, answer — see the
+                    # "no rules found" case), but nothing to even filter.
+                    # Surfacing this as a silent blank answer left the
+                    # frontend rendering an empty bubble with no explanation.
+                    return OrchestratorResult(
+                        answer="",
+                        needs_clarification=True,
+                        clarification_question=(
+                            "I wasn't able to find a grounded, citable answer to that "
+                            "— could you rephrase or narrow it down?"
+                        ),
+                    )
                 filtered_answer, dropped = enforce_citations(raw_answer)
                 return OrchestratorResult(answer=filtered_answer, dropped_claims=dropped)
 

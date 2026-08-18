@@ -76,6 +76,7 @@ async def test_tool_call_resolves_agency_and_returns_cited_answer():
     fr_impl.assert_awaited_once_with(
         action="search", agency_slug="environmental-protection-agency",
         doc_type=None, start_date=None, end_date=None, document_number=None,
+        per_page=5,
     )
 
 
@@ -126,6 +127,30 @@ async def test_uncited_claims_are_dropped_from_final_answer():
     assert "[doc:2026-1]" in result.answer
     assert "secretly doubled" not in result.answer
     assert len(result.dropped_claims) == 1
+
+
+@pytest.mark.asyncio
+async def test_empty_final_answer_asks_for_clarification_instead_of_going_blank():
+    """Regression case reported live 2026-08-18: the model stopped calling
+    tools (so the 'no tool_calls' early-return path fired, not the
+    iteration-budget-exhausted path) but returned no content at all. That
+    path returned OrchestratorResult(answer="", dropped_claims=[]) with
+    needs_clarification left False — the frontend rendered a blank answer
+    bubble with no error and no explanation. The iteration-exhausted path
+    already falls back to needs_clarification for an empty answer; the
+    early-return path must do the same instead of silently returning nothing.
+    """
+    llm = AsyncMock()
+    llm.chat.return_value = {"choices": [{"message": {"role": "assistant", "content": None}}]}
+    fr_impl = AsyncMock()
+    usaspending_impl = AsyncMock()
+    orchestrator = Orchestrator(llm, fr_impl, usaspending_impl, make_crosswalk(), DateResolver())
+
+    result = await orchestrator.handle_query("What is EPA?", today=date(2026, 8, 13))
+
+    assert result.answer == ""
+    assert result.needs_clarification is True
+    assert result.clarification_question
 
 
 @pytest.mark.asyncio
