@@ -201,3 +201,48 @@ async def test_handle_query_inserts_history_between_system_and_new_user_message(
     assert sent_messages[1] == prior_history[0]
     assert sent_messages[2] == prior_history[1]
     assert sent_messages[3] == {"role": "user", "content": "Are there any newer rules?"}
+
+
+@pytest.mark.asyncio
+async def test_reasoning_trace_is_not_carried_forward_in_history():
+    """Regression case found live on 2026-08-18: gpt-oss models (unlike the
+    prior llama-3.3-70b-versatile default) return a verbose 'reasoning'/
+    'reasoning_details' trace alongside every tool-calling message. Carrying
+    that raw trace forward in conversation history on every subsequent
+    iteration compounds token usage fast enough to blow Groq's TPM limit
+    within a single multi-tool-call query, turning an ordinary question into
+    a 413/429 failure. Only the fields the chat-completions API contract
+    actually needs (role, content, tool_calls) should be kept in history.
+    """
+    llm = AsyncMock()
+    tool_call_response = {
+        "choices": [{"message": {
+            "role": "assistant",
+            "content": None,
+            "reasoning": "Lengthy chain-of-thought the model doesn't need repeated back to it.",
+            "reasoning_details": [{"type": "reasoning.text", "text": "..."}],
+            "tool_calls": [{
+                "id": "call_1",
+                "function": {
+                    "name": "search_federal_register",
+                    "arguments": json.dumps({"action": "search", "agency_name": "Environmental Protection Agency"}),
+                },
+            }],
+        }}],
+    }
+    final_response = {
+        "choices": [{"message": {"role": "assistant", "content": "EPA proposed one rule [doc:2026-12345]."}}],
+    }
+    llm.chat.side_effect = [tool_call_response, final_response]
+
+    fr_impl = AsyncMock(return_value={"count": 1, "results": [{"document_number": "2026-12345"}]})
+    usaspending_impl = AsyncMock()
+    orchestrator = Orchestrator(llm, fr_impl, usaspending_impl, make_crosswalk(), DateResolver())
+
+    await orchestrator.handle_query("What is EPA?", today=date(2026, 8, 13))
+
+    second_call_messages = llm.chat.call_args_list[1].args[0]
+    assistant_message = next(m for m in second_call_messages if m.get("role") == "assistant")
+    assert "reasoning" not in assistant_message
+    assert "reasoning_details" not in assistant_message
+    assert assistant_message["tool_calls"] == tool_call_response["choices"][0]["message"]["tool_calls"]

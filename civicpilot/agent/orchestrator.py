@@ -205,7 +205,12 @@ class Orchestrator:
                 filtered_answer, dropped = enforce_citations(raw_answer)
                 return OrchestratorResult(answer=filtered_answer, dropped_claims=dropped)
 
-            messages.append(message)
+            # Some models (e.g. gpt-oss on Groq) attach a verbose reasoning
+            # trace to the raw message. Only the chat-completions API
+            # contract fields belong in history — carrying the trace forward
+            # on every subsequent iteration compounds token usage fast
+            # enough to blow a low TPM limit on an ordinary multi-tool query.
+            messages.append({"role": message["role"], "content": message.get("content"), "tool_calls": tool_calls})
             for call in tool_calls:
                 try:
                     fn = call["function"]
