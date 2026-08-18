@@ -50,3 +50,19 @@ def test_enforce_citations_drops_short_uncited_factual_claims():
     assert "[doc:2026-12345]" in kept
     assert "No mismatch was detected." not in kept
     assert "No mismatch was detected." in dropped
+
+
+def test_enforce_citations_recognizes_fullwidth_brackets():
+    """Regression case found during Task 16 live verification: the model
+    (openai/gpt-oss-120b on Groq) occasionally emits a real, correctly-sourced
+    citation using CJK fullwidth brackets (U+3010/U+3011) instead of ASCII
+    square brackets, despite the system prompt explicitly requiring ASCII.
+    Prompting alone can't guarantee a non-deterministic model's output
+    format, so the guard must normalize the common lookalike before matching
+    — otherwise a genuinely-cited claim is dropped as if it were uncited,
+    which is the opposite of what the citation guardrail is supposed to do.
+    """
+    text = "The DoD obligated $501B in FY2025【award:097-FY2025】."
+    kept, dropped = enforce_citations(text)
+    assert "[award:097-FY2025]" in kept
+    assert dropped == []
