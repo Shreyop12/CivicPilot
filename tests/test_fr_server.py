@@ -15,7 +15,25 @@ async def test_search_action_calls_client_search_documents():
 
     assert result == {"count": 0, "results": []}
     client.search_documents.assert_awaited_once_with(
-        agency_slug="epa", doc_type=None, start_date=None, end_date=None,
+        agency_slug="epa", doc_type=None, start_date=None, end_date=None, per_page=20,
+    )
+
+
+@pytest.mark.asyncio
+async def test_search_action_forwards_explicit_per_page():
+    """The chat agent passes a smaller per_page than the dashboard's default
+    20 to keep tool-call results from pushing a multi-search conversation
+    over Groq's TPM limit (found live 2026-08-18) — must actually thread
+    through this closure, not just the module-level function.
+    """
+    client = AsyncMock()
+    client.search_documents.return_value = {"count": 0, "results": []}
+    server = build_fr_server(client)
+
+    await server._search_documents_impl(action="search", agency_slug="epa", per_page=5)
+
+    client.search_documents.assert_awaited_once_with(
+        agency_slug="epa", doc_type=None, start_date=None, end_date=None, per_page=5,
     )
 
 
