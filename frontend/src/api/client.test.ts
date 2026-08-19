@@ -1,5 +1,24 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fetchAgencies, fetchDashboard, postChat } from "./client";
+import { fetchAgencies, fetchDashboard, streamChat } from "./client";
+
+function makeStreamBody(chunks: string[]) {
+  const encoder = new TextEncoder();
+  let i = 0;
+  return {
+    getReader() {
+      return {
+        async read() {
+          if (i < chunks.length) {
+            const value = encoder.encode(chunks[i]);
+            i += 1;
+            return { done: false, value };
+          }
+          return { done: true, value: undefined };
+        },
+      };
+    },
+  };
+}
 
 const originalFetch = globalThis.fetch;
 
@@ -42,22 +61,39 @@ describe("api client", () => {
     );
   });
 
-  it("postChat sends conversation_id and message as JSON", async () => {
-    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
-      ok: true,
-      json: async () => ({ answer: "Fine.", dropped_claims: [], needs_clarification: false, clarification_question: null }),
-    });
-
-    await postChat("conv-1", "What did EPA spend?");
-
-    const [, init] = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0];
-    expect(init.method).toBe("POST");
-    expect(JSON.parse(init.body)).toEqual({ conversation_id: "conv-1", message: "What did EPA spend?" });
-  });
-
   it("throws when the response is not ok", async () => {
     (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: false, status: 500, json: async () => ({}) });
 
     await expect(fetchAgencies()).rejects.toThrow();
+  });
+
+  it("streamChat posts to /api/chat/stream and parses SSE events split across chunk boundaries", async () => {
+    const sse =
+      'data: {"type":"status","tool":"search_federal_register","message":"Searching…"}\n\n' +
+      'data: {"type":"answer","answer":"EPA spent $1B [award:1].","dropped_claims":[],"needs_clarification":false,"clarification_question":null}\n\n';
+    const splitPoint = 30;
+    const body = makeStreamBody([sse.slice(0, splitPoint), sse.slice(splitPoint)]);
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: true, body });
+
+    const events: unknown[] = [];
+    await streamChat("conv-1", "What did EPA spend?", (event) => events.push(event));
+
+    expect(events).toEqual([
+      { type: "status", tool: "search_federal_register", message: "Searching…" },
+      {
+        type: "answer", answer: "EPA spent $1B [award:1].", dropped_claims: [],
+        needs_clarification: false, clarification_question: null,
+      },
+    ]);
+    const [url, init] = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(url).toContain("/api/chat/stream");
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(init.body)).toEqual({ conversation_id: "conv-1", message: "What did EPA spend?" });
+  });
+
+  it("streamChat throws when the response is not ok", async () => {
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: false, status: 500, body: null });
+
+    await expect(streamChat("conv-1", "hi", () => {})).rejects.toThrow();
   });
 });

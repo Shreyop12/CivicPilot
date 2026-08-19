@@ -53,6 +53,12 @@ async def test_flagship_query_returns_cited_answer_from_both_sources():
             }],
         }}],
     }
+    # tool_llm stops requesting tools with this turn — its content is
+    # discarded, but the API still needs a response for this call before
+    # the orchestrator makes its one dedicated call to answer_llm below.
+    tool_llm_done_turn = {
+        "choices": [{"message": {"role": "assistant", "content": None}}],
+    }
     final_turn = {
         "choices": [{"message": {
             "role": "assistant",
@@ -66,6 +72,7 @@ async def test_flagship_query_returns_cited_answer_from_both_sources():
         side_effect=[
             httpx.Response(200, json=first_turn),
             httpx.Response(200, json=second_turn),
+            httpx.Response(200, json=tool_llm_done_turn),
             httpx.Response(200, json=final_turn),
         ]
     )
@@ -76,8 +83,10 @@ async def test_flagship_query_returns_cited_answer_from_both_sources():
         usaspending_server = build_usaspending_server(
             USASpendingClient(http, cache), USASpendingDownloadClient(http),
         )
+        llm = GroqClient(http, api_key="test-key")
         orchestrator = Orchestrator(
-            llm=GroqClient(http, api_key="test-key"),
+            tool_llm=llm,
+            answer_llm=llm,
             fr_impl=fr_server._search_documents_impl,
             usaspending_impl=usaspending_server._query_spending_impl,
             crosswalk=load_default_crosswalk(),

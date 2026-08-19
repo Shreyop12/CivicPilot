@@ -32,3 +32,8 @@ export interface ChatResponse {
   needs_clarification: boolean;
   clarification_question: string | null;
 }
+
+export type ChatStreamEvent =
+  | { type: "status"; tool: string; message: string }
+  | (ChatResponse & { type: "answer" })
+  | { type: "error"; detail: string };

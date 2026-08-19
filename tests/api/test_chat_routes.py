@@ -1,3 +1,4 @@
+import json
 from unittest.mock import AsyncMock
 
 import httpx
@@ -107,3 +108,76 @@ async def test_chat_returns_clean_503_when_llm_providers_are_unavailable():
 
     assert response.status_code == 503
     assert "conv-3" not in conversations
+
+
+def parse_sse_events(body: str) -> list[dict]:
+    return [
+        json.loads(chunk[len("data: "):])
+        for chunk in body.strip().split("\n\n")
+        if chunk.startswith("data: ")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_emits_sse_events_and_stores_final_answer_in_history():
+    async def fake_stream(message, history=None):
+        yield {"type": "status", "tool": "search_federal_register", "message": "Searching Federal Register…"}
+        yield {
+            "type": "answer", "answer": "EPA spent $1B [award:1].", "dropped_claims": [],
+            "needs_clarification": False, "clarification_question": None,
+        }
+
+    components = make_fake_components(None)
+    components.orchestrator.handle_query_stream = fake_stream
+    conversations: dict = {}
+
+    app = create_app()
+    app.dependency_overrides[get_components] = lambda: components
+    app.dependency_overrides[get_conversations] = lambda: conversations
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with client.stream(
+            "POST", "/api/chat/stream", json={"conversation_id": "conv-4", "message": "What did EPA spend?"},
+        ) as response:
+            assert response.status_code == 200
+            assert response.headers["content-type"].startswith("text/event-stream")
+            body = "".join([chunk async for chunk in response.aiter_text()])
+
+    events = parse_sse_events(body)
+    assert events[0] == {"type": "status", "tool": "search_federal_register", "message": "Searching Federal Register…"}
+    assert events[-1]["type"] == "answer"
+    assert events[-1]["answer"] == "EPA spent $1B [award:1]."
+    assert conversations["conv-4"] == [
+        {"role": "user", "content": "What did EPA spend?"},
+        {"role": "assistant", "content": "EPA spent $1B [award:1]."},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_yields_error_event_when_llm_providers_fail_mid_stream():
+    async def fake_stream(message, history=None):
+        yield {"type": "status", "tool": "search_federal_register", "message": "Searching Federal Register…"}
+        raise httpx.HTTPStatusError(
+            "429", request=httpx.Request("POST", "http://x"), response=httpx.Response(429),
+        )
+
+    components = make_fake_components(None)
+    components.orchestrator.handle_query_stream = fake_stream
+    conversations: dict = {}
+
+    app = create_app()
+    app.dependency_overrides[get_components] = lambda: components
+    app.dependency_overrides[get_conversations] = lambda: conversations
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with client.stream(
+            "POST", "/api/chat/stream", json={"conversation_id": "conv-5", "message": "What is EPA?"},
+        ) as response:
+            assert response.status_code == 200
+            body = "".join([chunk async for chunk in response.aiter_text()])
+
+    events = parse_sse_events(body)
+    assert events[-1]["type"] == "error"
+    assert "conv-5" not in conversations

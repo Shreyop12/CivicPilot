@@ -24,6 +24,9 @@ civicpilot = "civicpilot.main:run"
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 
+[tool.setuptools.packages.find]
+include = ["civicpilot*"]
+
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"

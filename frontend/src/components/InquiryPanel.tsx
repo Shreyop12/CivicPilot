@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from "react";
-import { postChat } from "../api/client";
+import { streamChat } from "../api/client";
 import { AnswerMarkdown } from "./AnswerMarkdown";
 import { Input } from "./ui/input";
+
+const DEFAULT_STATUS_MESSAGE = "Looking this up…";
 
 export interface InquiryPanelProps {
   conversationId: string;
@@ -28,6 +30,7 @@ export function InquiryPanel({ conversationId }: InquiryPanelProps) {
   const [turns, setTurns] = useState<Turn[]>([]);
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
+  const [statusMessage, setStatusMessage] = useState(DEFAULT_STATUS_MESSAGE);
   const [width, setWidth] = useState(readStoredWidth);
   const panelRef = useRef<HTMLDivElement>(null);
   const resizingRef = useRef(false);
@@ -70,16 +73,24 @@ export function InquiryPanel({ conversationId }: InquiryPanelProps) {
     setDraft("");
     setTurns((prev) => [...prev, { role: "user", text: message }]);
     setSending(true);
+    setStatusMessage(DEFAULT_STATUS_MESSAGE);
     try {
-      const response = await postChat(conversationId, message);
-      if (response.needs_clarification) {
-        setTurns((prev) => [...prev, { role: "clarification", text: response.clarification_question ?? "" }]);
-      } else {
-        setTurns((prev) => [
-          ...prev,
-          { role: "answer", text: response.answer, droppedCount: response.dropped_claims.length },
-        ]);
-      }
+      await streamChat(conversationId, message, (event) => {
+        if (event.type === "status") {
+          setStatusMessage(event.message);
+        } else if (event.type === "answer") {
+          if (event.needs_clarification) {
+            setTurns((prev) => [...prev, { role: "clarification", text: event.clarification_question ?? "" }]);
+          } else {
+            setTurns((prev) => [
+              ...prev,
+              { role: "answer", text: event.answer, droppedCount: event.dropped_claims.length },
+            ]);
+          }
+        } else if (event.type === "error") {
+          setTurns((prev) => [...prev, { role: "error", text: "Something went wrong — try again." }]);
+        }
+      });
     } catch {
       setTurns((prev) => [...prev, { role: "error", text: "Something went wrong — try again." }]);
     } finally {
@@ -142,7 +153,7 @@ export function InquiryPanel({ conversationId }: InquiryPanelProps) {
             <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-muted [animation-delay:-0.3s]" />
             <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-muted [animation-delay:-0.15s]" />
             <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-muted" />
-            <span>Looking this up…</span>
+            <span>{statusMessage}</span>
           </div>
         )}
       </div>

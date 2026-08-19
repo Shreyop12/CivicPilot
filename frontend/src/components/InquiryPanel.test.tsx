@@ -2,37 +2,41 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { InquiryPanel } from "./InquiryPanel";
-import { postChat } from "../api/client";
-import type { ChatResponse } from "../api/types";
+import { streamChat } from "../api/client";
+import type { ChatStreamEvent } from "../api/types";
 
 vi.mock("../api/client", () => ({
-  postChat: vi.fn(),
+  streamChat: vi.fn(),
 }));
+
+function mockStream(events: ChatStreamEvent[]) {
+  vi.mocked(streamChat).mockImplementation(async (_conversationId, _message, onEvent) => {
+    for (const event of events) onEvent(event);
+  });
+}
 
 describe("InquiryPanel", () => {
   it("sends a message on Enter and renders the cited answer", async () => {
-    vi.mocked(postChat).mockResolvedValue({
-      answer: "EPA spent $1B [award:068-FY2026].",
-      dropped_claims: [],
-      needs_clarification: false,
-      clarification_question: null,
-    });
+    mockStream([
+      { type: "answer", answer: "EPA spent $1B [award:068-FY2026].", dropped_claims: [], needs_clarification: false, clarification_question: null },
+    ]);
     render(<InquiryPanel conversationId="conv-1" />);
 
     await userEvent.type(screen.getByLabelText(/ask a follow-up/i), "What did EPA spend?{Enter}");
 
     expect(screen.getByText("What did EPA spend?")).toBeInTheDocument();
     await waitFor(() => expect(screen.getByText(/EPA spent \$1B/)).toBeInTheDocument());
-    expect(postChat).toHaveBeenCalledWith("conv-1", "What did EPA spend?");
+    expect(streamChat).toHaveBeenCalledWith("conv-1", "What did EPA spend?", expect.any(Function));
   });
 
   it("shows a dropped-claims caption when claims were omitted", async () => {
-    vi.mocked(postChat).mockResolvedValue({
-      answer: "EPA spent $1B [award:068-FY2026].",
-      dropped_claims: ["unsupported claim one", "unsupported claim two"],
-      needs_clarification: false,
-      clarification_question: null,
-    });
+    mockStream([
+      {
+        type: "answer", answer: "EPA spent $1B [award:068-FY2026].",
+        dropped_claims: ["unsupported claim one", "unsupported claim two"],
+        needs_clarification: false, clarification_question: null,
+      },
+    ]);
     render(<InquiryPanel conversationId="conv-1" />);
 
     await userEvent.type(screen.getByLabelText(/ask a follow-up/i), "What did EPA spend?{Enter}");
@@ -41,12 +45,9 @@ describe("InquiryPanel", () => {
   });
 
   it("renders a clarification response distinctly from a normal answer", async () => {
-    vi.mocked(postChat).mockResolvedValue({
-      answer: "",
-      dropped_claims: [],
-      needs_clarification: true,
-      clarification_question: "Calendar year or fiscal year?",
-    });
+    mockStream([
+      { type: "answer", answer: "", dropped_claims: [], needs_clarification: true, clarification_question: "Calendar year or fiscal year?" },
+    ]);
     render(<InquiryPanel conversationId="conv-1" />);
 
     await userEvent.type(screen.getByLabelText(/ask a follow-up/i), "What did EPA spend this year?{Enter}");
@@ -55,10 +56,10 @@ describe("InquiryPanel", () => {
   });
 
   it("shows a thinking indicator while a request is in flight", async () => {
-    let resolveChat: (value: ChatResponse) => void = () => {};
-    vi.mocked(postChat).mockReturnValue(
+    let resolveStream: () => void = () => {};
+    vi.mocked(streamChat).mockReturnValue(
       new Promise((resolve) => {
-        resolveChat = resolve;
+        resolveStream = () => resolve(undefined);
       })
     );
     render(<InquiryPanel conversationId="conv-1" />);
@@ -67,17 +68,43 @@ describe("InquiryPanel", () => {
 
     expect(screen.getByText(/looking this up/i)).toBeInTheDocument();
 
-    resolveChat({
-      answer: "EPA spent $1B [award:068-FY2026].",
-      dropped_claims: [],
-      needs_clarification: false,
-      clarification_question: null,
-    });
+    resolveStream();
     await waitFor(() => expect(screen.queryByText(/looking this up/i)).not.toBeInTheDocument());
   });
 
+  it("shows the live status message from a status event, then replaces it with the final answer", async () => {
+    let emitAnswer: () => void = () => {};
+    vi.mocked(streamChat).mockImplementation(async (_conversationId, _message, onEvent) => {
+      onEvent({ type: "status", tool: "search_federal_register", message: "Searching Federal Register…" });
+      await new Promise<void>((resolve) => {
+        emitAnswer = () => {
+          onEvent({ type: "answer", answer: "EPA proposed one rule [doc:1].", dropped_claims: [], needs_clarification: false, clarification_question: null });
+          resolve();
+        };
+      });
+    });
+    render(<InquiryPanel conversationId="conv-1" />);
+
+    await userEvent.type(screen.getByLabelText(/ask a follow-up/i), "What did EPA propose?{Enter}");
+
+    await waitFor(() => expect(screen.getByText("Searching Federal Register…")).toBeInTheDocument());
+
+    emitAnswer();
+    await waitFor(() => expect(screen.getByText(/EPA proposed one rule/)).toBeInTheDocument());
+    expect(screen.queryByText("Searching Federal Register…")).not.toBeInTheDocument();
+  });
+
   it("shows an error bubble when the request fails", async () => {
-    vi.mocked(postChat).mockRejectedValue(new Error("network error"));
+    vi.mocked(streamChat).mockRejectedValue(new Error("network error"));
+    render(<InquiryPanel conversationId="conv-1" />);
+
+    await userEvent.type(screen.getByLabelText(/ask a follow-up/i), "What did EPA spend?{Enter}");
+
+    await waitFor(() => expect(screen.getByText(/something went wrong/i)).toBeInTheDocument());
+  });
+
+  it("shows an error bubble when the stream itself yields an error event", async () => {
+    mockStream([{ type: "error", detail: "Answer generation is temporarily unavailable — try again." }]);
     render(<InquiryPanel conversationId="conv-1" />);
 
     await userEvent.type(screen.getByLabelText(/ask a follow-up/i), "What did EPA spend?{Enter}");

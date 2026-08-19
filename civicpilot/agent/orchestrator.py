@@ -39,6 +39,19 @@ SYSTEM_PROMPT_TEMPLATE = (
     "which agency name was actually matched rather than silently trusting it."
 )
 
+# Groq rejects chat(messages, tools=None) with a 400 ("Tool choice is none,
+# but model called a tool") whenever the model tries to call one anyway —
+# which it reliably does here, since the system prompt above tells it to
+# always use tools, and this call follows a conversation full of tool calls.
+# tool_choice="none" does not fix this live: Groq still errors on the
+# attempt itself, regardless of tool_choice. An explicit instruction not to
+# call tools changes the model's own behavior instead of fighting the API
+# validator, and was verified working live against the real Groq API.
+NO_MORE_TOOLS_INSTRUCTION = (
+    "Do not call any more tools. Using only the information already "
+    "gathered above, write your final answer now, citing every claim."
+)
+
 FR_TOOL_SCHEMA = {
     "type": "function",
     "function": {
@@ -60,6 +73,11 @@ FR_TOOL_SCHEMA = {
             "required": ["action"],
         },
     },
+}
+
+TOOL_STATUS_MESSAGES = {
+    "search_federal_register": "Searching Federal Register…",
+    "query_usaspending": "Checking USAspending records…",
 }
 
 USASPENDING_TOOL_SCHEMA = {
@@ -101,13 +119,15 @@ class OrchestratorResult:
 class Orchestrator:
     def __init__(
         self,
-        llm: GroqClient,
+        tool_llm: GroqClient,
+        answer_llm: GroqClient,
         fr_impl,
         usaspending_impl,
         crosswalk: AgencyCrosswalk,
         date_resolver: DateResolver,
     ):
-        self._llm = llm
+        self._tool_llm = tool_llm
+        self._answer_llm = answer_llm
         self._fr_impl = fr_impl
         self._usaspending_impl = usaspending_impl
         self._crosswalk = crosswalk
@@ -214,6 +234,29 @@ class Orchestrator:
     async def handle_query(
         self, user_query: str, today: date | None = None, history: list[dict] | None = None,
     ) -> OrchestratorResult:
+        final_event = None
+        async for event in self.handle_query_stream(user_query, today=today, history=history):
+            if event["type"] == "answer":
+                final_event = event
+        return OrchestratorResult(
+            answer=final_event["answer"],
+            dropped_claims=final_event["dropped_claims"],
+            needs_clarification=final_event["needs_clarification"],
+            clarification_question=final_event["clarification_question"],
+        )
+
+    async def handle_query_stream(
+        self, user_query: str, today: date | None = None, history: list[dict] | None = None,
+    ):
+        """Runs the same tool-call loop as handle_query, but yields a status
+        event before each tool dispatch so a caller can surface progress
+        during what's otherwise dead air across multiple LLM/tool round
+        trips. Yields exactly one terminal {"type": "answer", ...} event with
+        the same fields as OrchestratorResult. Does not catch LLM errors —
+        those propagate to the caller exactly as handle_query already
+        expected (see the route's 503 handling), since a media-type-specific
+        conversion (e.g. to an SSE error event) belongs at that layer, not
+        here."""
         today = today or date.today()
 
         ambiguity = self._detect_ambiguous_period(user_query, today)
@@ -221,16 +264,17 @@ class Orchestrator:
         if ambiguity is not None:
             phrase, resolution = ambiguity
             if resolution.diverges:
-                return OrchestratorResult(
-                    answer="",
-                    needs_clarification=True,
-                    clarification_question=(
+                yield {
+                    "type": "answer", "answer": "", "dropped_claims": [],
+                    "needs_clarification": True,
+                    "clarification_question": (
                         f"You said '{phrase}' — do you mean the calendar {resolution.period_label} "
                         f"({resolution.calendar_range.start} to {resolution.calendar_range.end}) or the "
                         f"federal fiscal {resolution.period_label} "
                         f"({resolution.fiscal_range.start} to {resolution.fiscal_range.end})?"
                     ),
-                )
+                }
+                return
             resolved_addendum = (
                 f"The user said '{phrase}', which resolves to {resolution.calendar_range.start} "
                 f"through {resolution.calendar_range.end} — mention this range in your answer."
@@ -247,29 +291,22 @@ class Orchestrator:
         tools = [FR_TOOL_SCHEMA, USASPENDING_TOOL_SCHEMA]
         truncation_notes: list[str] = []
 
+        # The loop only ever uses tool_llm — a small/cheap model whose job is
+        # picking tool calls, not writing prose. Whatever content it produces
+        # once it stops requesting tools is never used as the final answer;
+        # that's always synthesized by one dedicated answer_llm call below,
+        # made without tools so the model has no choice but to respond with
+        # content. This keeps the repeated, schema-heavy loop calls off the
+        # primary/large model, which is what was actually tripping Groq's TPM
+        # limit — not the (single) final answer call.
+        budget_exhausted = True
         for _ in range(MAX_TOOL_ITERATIONS):
-            response = await self._llm.chat(messages, tools=tools)
+            response = await self._tool_llm.chat(messages, tools=tools)
             message = response["choices"][0]["message"]
             tool_calls = message.get("tool_calls") or []
             if not tool_calls:
-                raw_answer = message.get("content") or ""
-                if not raw_answer.strip():
-                    # The model stopped calling tools but produced no content
-                    # at all — not "said something uncited that got dropped"
-                    # (that's a legitimate, if unhelpful, answer — see the
-                    # "no rules found" case), but nothing to even filter.
-                    # Surfacing this as a silent blank answer left the
-                    # frontend rendering an empty bubble with no explanation.
-                    return OrchestratorResult(
-                        answer="",
-                        needs_clarification=True,
-                        clarification_question=(
-                            "I wasn't able to find a grounded, citable answer to that "
-                            "— could you rephrase or narrow it down?"
-                        ),
-                    )
-                filtered_answer, dropped = self._finalize_answer(raw_answer, truncation_notes)
-                return OrchestratorResult(answer=filtered_answer, dropped_claims=dropped)
+                budget_exhausted = False
+                break
 
             # Some models (e.g. gpt-oss on Groq) attach a verbose reasoning
             # trace to the raw message. Only the chat-completions API
@@ -277,6 +314,12 @@ class Orchestrator:
             # on every subsequent iteration compounds token usage fast
             # enough to blow a low TPM limit on an ordinary multi-tool query.
             messages.append({"role": message["role"], "content": message.get("content"), "tool_calls": tool_calls})
+            for call in tool_calls:
+                tool_name = call["function"]["name"]
+                yield {
+                    "type": "status", "tool": tool_name,
+                    "message": TOOL_STATUS_MESSAGES.get(tool_name, "Working…"),
+                }
             # A single turn can request FR and USAspending in the same breath —
             # they hit independent APIs, so run them concurrently instead of
             # paying their latency back-to-back.
@@ -286,20 +329,33 @@ class Orchestrator:
                 if note:
                     truncation_notes.append(note)
 
-        # Tool-call budget exhausted. Give the model one last chance to answer
-        # from whatever it already gathered, instead of discarding it outright.
-        final_response = await self._llm.chat(messages, tools=None)
+        messages.append({"role": "user", "content": NO_MORE_TOOLS_INSTRUCTION})
+        yield {
+            "type": "status", "tool": "synthesize_answer", "message": "Writing your answer…",
+        }
+        final_response = await self._answer_llm.chat(messages, tools=None)
         final_message = final_response["choices"][0]["message"]
         raw_answer = final_message.get("content") or ""
         filtered_answer, dropped = self._finalize_answer(raw_answer, truncation_notes)
         if filtered_answer.strip():
-            return OrchestratorResult(answer=filtered_answer, dropped_claims=dropped)
+            yield {
+                "type": "answer", "answer": filtered_answer, "dropped_claims": dropped,
+                "needs_clarification": False, "clarification_question": None,
+            }
+            return
 
-        return OrchestratorResult(
-            answer="",
-            needs_clarification=True,
-            clarification_question=(
+        if budget_exhausted:
+            clarification_question = (
                 "I couldn't complete this query within the available tool-call budget "
                 "— could you narrow it down?"
-            ),
-        )
+            )
+        else:
+            clarification_question = (
+                "I wasn't able to find a grounded, citable answer to that "
+                "— could you rephrase or narrow it down?"
+            )
+        yield {
+            "type": "answer", "answer": "", "dropped_claims": [],
+            "needs_clarification": True,
+            "clarification_question": clarification_question,
+        }

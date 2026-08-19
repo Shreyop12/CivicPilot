@@ -43,20 +43,31 @@ async def build_orchestrator() -> AppComponents:
         USASpendingClient(http, cache), USASpendingDownloadClient(http),
     )
 
-    primary_llm = GroqClient(http, api_key=api_key)
+    groq_llm = GroqClient(http, api_key=api_key)
     fallback_api_key = os.environ.get("OPENROUTER_API_KEY")
     if fallback_api_key:
-        llm = FailoverLLMClient(primary_llm, OpenRouterClient(http, api_key=fallback_api_key))
+        openrouter_llm = OpenRouterClient(http, api_key=fallback_api_key)
+        # Tool-selection loop iterations carry the full tool schema plus a
+        # growing conversation history on every call — that's what actually
+        # trips Groq's TPM limit, not the (single) final answer. Routing
+        # those to the small OpenRouter model first relieves that pressure;
+        # the final answer still prefers Groq's quality. Each direction
+        # keeps the other provider as its fallback so an outage on either
+        # side degrades rather than fails the whole query.
+        tool_llm = FailoverLLMClient(openrouter_llm, groq_llm)
+        answer_llm = FailoverLLMClient(groq_llm, openrouter_llm)
     else:
         logging.getLogger(__name__).warning(
             "OPENROUTER_API_KEY not set — no fallback LLM configured; a Groq "
             "outage or rate limit will fail the whole query."
         )
-        llm = primary_llm
+        tool_llm = groq_llm
+        answer_llm = groq_llm
 
     crosswalk = load_default_crosswalk()
     orchestrator = Orchestrator(
-        llm=llm,
+        tool_llm=tool_llm,
+        answer_llm=answer_llm,
         fr_impl=fr_server._search_documents_impl,
         usaspending_impl=usaspending_server._query_spending_impl,
         crosswalk=crosswalk,

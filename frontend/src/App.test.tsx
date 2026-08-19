@@ -7,7 +7,7 @@ import { fetchAgencies, fetchDashboard } from "./api/client";
 vi.mock("./api/client", () => ({
   fetchAgencies: vi.fn(),
   fetchDashboard: vi.fn(),
-  postChat: vi.fn(),
+  streamChat: vi.fn(),
 }));
 
 describe("App", () => {
