@@ -229,6 +229,61 @@ async def test_handle_query_inserts_history_between_system_and_new_user_message(
 
 
 @pytest.mark.asyncio
+async def test_truncated_search_results_get_a_deterministic_note_not_llm_prose():
+    """Regression, found live 2026-08-18: chat search results are capped to
+    CHAT_SEARCH_PAGE_SIZE (5) to stay under Groq's TPM limit, but a query
+    like 'DOT final rules this quarter' can have hundreds of real matches
+    (count=251 seen live against the actual Federal Register API). A first
+    attempt asked the model to disclose the gap in its own prose, but a
+    sentence about the *total* count has no single [doc:id] to cite, so
+    enforce_citations silently dropped it — the disclosure never reached the
+    user, it just landed in dropped_claims. The note must be generated
+    deterministically from the tool result's own 'count' field so it can
+    never be filtered out.
+    """
+    llm = AsyncMock()
+    tool_call_response = {"choices": [{"message": {
+        "role": "assistant",
+        "tool_calls": [{
+            "id": "call_1",
+            "function": {"name": "search_federal_register", "arguments": json.dumps({"action": "search"})},
+        }],
+    }}]}
+    final_response = {"choices": [{"message": {"role": "assistant", "content": "Here are a few examples [doc:1]."}}]}
+    llm.chat.side_effect = [tool_call_response, final_response]
+    fr_impl = AsyncMock(return_value={"count": 251, "results": [{"document_number": "1"}] * 5})
+    usaspending_impl = AsyncMock()
+    orchestrator = Orchestrator(llm, fr_impl, usaspending_impl, make_crosswalk(), DateResolver())
+
+    result = await orchestrator.handle_query("What final rules did DOT publish this quarter?", today=date(2026, 8, 13))
+
+    assert "5 of 251" in result.answer
+    assert "[doc:1]" in result.answer
+
+
+@pytest.mark.asyncio
+async def test_untruncated_search_results_get_no_note():
+    llm = AsyncMock()
+    tool_call_response = {"choices": [{"message": {
+        "role": "assistant",
+        "tool_calls": [{
+            "id": "call_1",
+            "function": {"name": "search_federal_register", "arguments": json.dumps({"action": "search"})},
+        }],
+    }}]}
+    final_response = {"choices": [{"message": {"role": "assistant", "content": "Just this one [doc:1]."}}]}
+    llm.chat.side_effect = [tool_call_response, final_response]
+    fr_impl = AsyncMock(return_value={"count": 1, "results": [{"document_number": "1"}]})
+    usaspending_impl = AsyncMock()
+    orchestrator = Orchestrator(llm, fr_impl, usaspending_impl, make_crosswalk(), DateResolver())
+
+    result = await orchestrator.handle_query("What final rule did DOT publish this quarter?", today=date(2026, 8, 13))
+
+    assert "of" not in result.answer.lower().replace("just this one", "")
+    assert result.answer.strip() == "Just this one [doc:1]."
+
+
+@pytest.mark.asyncio
 async def test_reasoning_trace_is_not_carried_forward_in_history():
     """Regression case found live on 2026-08-18: gpt-oss models (unlike the
     prior llama-3.3-70b-versatile default) return a verbose 'reasoning'/

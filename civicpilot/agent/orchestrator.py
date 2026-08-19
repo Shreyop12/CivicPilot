@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 from dataclasses import dataclass, field
@@ -169,6 +170,47 @@ class Orchestrator:
             result = {**result, "agency_match_verified": False, "agency_match_used": resolution.matched_name}
         return result
 
+    async def _run_tool_call(self, call: dict) -> tuple[str, str | None]:
+        try:
+            fn = call["function"]
+            arguments = json.loads(fn["arguments"])
+            result = await self._dispatch_tool_call(fn["name"], arguments)
+            return json.dumps(result), self._truncation_note(fn["name"], result)
+        except Exception as exc:
+            tool_name = call.get("function", {}).get("name", "<unknown>")
+            logger.exception("Tool dispatch failed for tool %r", tool_name)
+            return json.dumps({"error": str(exc)}), None
+
+    @staticmethod
+    def _truncation_note(tool_name: str, result: dict) -> str | None:
+        # CHAT_SEARCH_PAGE_SIZE caps every chat search well below what a
+        # "list the rules from X" query can actually match (seen live:
+        # count=251 for one agency/quarter, 5 returned) — asking the model to
+        # narrate that gap in cite-able prose doesn't work, since a sentence
+        # about the *total* count has no single [doc:id] to cite and
+        # enforce_citations silently drops it. Report it deterministically
+        # from the tool result instead, bypassing the citation guard entirely.
+        if tool_name != "search_federal_register":
+            return None
+        count = result.get("count") if isinstance(result, dict) else None
+        results = result.get("results") if isinstance(result, dict) else None
+        if not isinstance(count, int) or not isinstance(results, list):
+            return None
+        if count > len(results):
+            return (
+                f"_Showing {len(results)} of {count} matching Federal Register documents — "
+                "narrow by sub-agency or a shorter date range to see more._"
+            )
+        return None
+
+    @staticmethod
+    def _finalize_answer(raw_answer: str, truncation_notes: list[str]) -> tuple[str, list[str]]:
+        filtered_answer, dropped = enforce_citations(raw_answer)
+        if truncation_notes:
+            note_block = "\n".join(dict.fromkeys(truncation_notes))
+            filtered_answer = f"{filtered_answer}\n\n{note_block}".strip() if filtered_answer else note_block
+        return filtered_answer, dropped
+
     async def handle_query(
         self, user_query: str, today: date | None = None, history: list[dict] | None = None,
     ) -> OrchestratorResult:
@@ -203,6 +245,7 @@ class Orchestrator:
             messages.extend(history)
         messages.append({"role": "user", "content": user_query})
         tools = [FR_TOOL_SCHEMA, USASPENDING_TOOL_SCHEMA]
+        truncation_notes: list[str] = []
 
         for _ in range(MAX_TOOL_ITERATIONS):
             response = await self._llm.chat(messages, tools=tools)
@@ -225,7 +268,7 @@ class Orchestrator:
                             "— could you rephrase or narrow it down?"
                         ),
                     )
-                filtered_answer, dropped = enforce_citations(raw_answer)
+                filtered_answer, dropped = self._finalize_answer(raw_answer, truncation_notes)
                 return OrchestratorResult(answer=filtered_answer, dropped_claims=dropped)
 
             # Some models (e.g. gpt-oss on Groq) attach a verbose reasoning
@@ -234,24 +277,21 @@ class Orchestrator:
             # on every subsequent iteration compounds token usage fast
             # enough to blow a low TPM limit on an ordinary multi-tool query.
             messages.append({"role": message["role"], "content": message.get("content"), "tool_calls": tool_calls})
-            for call in tool_calls:
-                try:
-                    fn = call["function"]
-                    arguments = json.loads(fn["arguments"])
-                    result = await self._dispatch_tool_call(fn["name"], arguments)
-                    content = json.dumps(result)
-                except Exception as exc:
-                    tool_name = call.get("function", {}).get("name", "<unknown>")
-                    logger.exception("Tool dispatch failed for tool %r", tool_name)
-                    content = json.dumps({"error": str(exc)})
+            # A single turn can request FR and USAspending in the same breath —
+            # they hit independent APIs, so run them concurrently instead of
+            # paying their latency back-to-back.
+            outcomes = await asyncio.gather(*(self._run_tool_call(call) for call in tool_calls))
+            for call, (content, note) in zip(tool_calls, outcomes):
                 messages.append({"role": "tool", "tool_call_id": call.get("id"), "content": content})
+                if note:
+                    truncation_notes.append(note)
 
         # Tool-call budget exhausted. Give the model one last chance to answer
         # from whatever it already gathered, instead of discarding it outright.
         final_response = await self._llm.chat(messages, tools=None)
         final_message = final_response["choices"][0]["message"]
         raw_answer = final_message.get("content") or ""
-        filtered_answer, dropped = enforce_citations(raw_answer)
+        filtered_answer, dropped = self._finalize_answer(raw_answer, truncation_notes)
         if filtered_answer.strip():
             return OrchestratorResult(answer=filtered_answer, dropped_claims=dropped)
 

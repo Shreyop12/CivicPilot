@@ -1,6 +1,6 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { postChat } from "../api/client";
-import { renderAnswerWithStamps } from "./renderAnswerWithStamps";
+import { AnswerMarkdown } from "./AnswerMarkdown";
 import { Input } from "./ui/input";
 
 export interface InquiryPanelProps {
@@ -13,10 +13,56 @@ interface Turn {
   droppedCount?: number;
 }
 
+const MIN_WIDTH = 280;
+const MAX_WIDTH = 560;
+const DEFAULT_WIDTH = 340;
+const WIDTH_STORAGE_KEY = "civicpilot.inquiry-panel-width";
+
+function readStoredWidth(): number {
+  if (typeof window === "undefined") return DEFAULT_WIDTH;
+  const stored = Number(window.localStorage.getItem(WIDTH_STORAGE_KEY));
+  return stored >= MIN_WIDTH && stored <= MAX_WIDTH ? stored : DEFAULT_WIDTH;
+}
+
 export function InquiryPanel({ conversationId }: InquiryPanelProps) {
   const [turns, setTurns] = useState<Turn[]>([]);
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
+  const [width, setWidth] = useState(readStoredWidth);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const resizingRef = useRef(false);
+  const widthRef = useRef(width);
+
+  useEffect(() => {
+    widthRef.current = width;
+  }, [width]);
+
+  useEffect(() => {
+    function onPointerMove(event: PointerEvent) {
+      if (!resizingRef.current || !panelRef.current) return;
+      const right = panelRef.current.getBoundingClientRect().right;
+      const next = Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, right - event.clientX));
+      setWidth(next);
+    }
+    function onPointerUp() {
+      if (!resizingRef.current) return;
+      resizingRef.current = false;
+      document.body.style.removeProperty("cursor");
+      window.localStorage.setItem(WIDTH_STORAGE_KEY, String(widthRef.current));
+    }
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", onPointerUp);
+    return () => {
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", onPointerUp);
+    };
+  }, []);
+
+  function startResize(event: React.PointerEvent) {
+    event.preventDefault();
+    resizingRef.current = true;
+    document.body.style.cursor = "col-resize";
+  }
 
   async function send() {
     const message = draft.trim();
@@ -42,11 +88,22 @@ export function InquiryPanel({ conversationId }: InquiryPanelProps) {
   }
 
   return (
-    <div className="flex w-full shrink-0 flex-col border-hairline bg-card md:w-[290px] md:border-l">
+    <div
+      ref={panelRef}
+      className="relative flex w-full min-w-0 shrink-0 flex-col border-hairline bg-card md:w-[var(--panel-width)] md:border-l"
+      style={{ "--panel-width": `${width}px` } as React.CSSProperties}
+    >
+      <div
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize inquiry log"
+        onPointerDown={startResize}
+        className="absolute inset-y-0 left-0 hidden w-3 -translate-x-1/2 cursor-col-resize touch-none select-none md:block"
+      />
       <div className="border-b border-hairline p-3.5 font-mono text-xs uppercase tracking-wider text-muted">
         Inquiry log
       </div>
-      <div className="flex-1 space-y-3.5 overflow-y-auto p-4">
+      <div className="min-w-0 flex-1 space-y-3.5 overflow-y-auto overflow-x-hidden p-4">
         {turns.map((turn, index) => {
           if (turn.role === "user") {
             return (
@@ -70,8 +127,8 @@ export function InquiryPanel({ conversationId }: InquiryPanelProps) {
             );
           }
           return (
-            <div key={index} className="border-t-2 border-primary pt-2 text-xs leading-relaxed text-ink">
-              <div>{renderAnswerWithStamps(turn.text)}</div>
+            <div key={index} className="min-w-0 border-t-2 border-primary pt-2 text-xs leading-relaxed text-ink">
+              <AnswerMarkdown text={turn.text} />
               {!!turn.droppedCount && (
                 <div className="mt-1.5 font-mono text-[10px] text-muted">
                   {turn.droppedCount} unverifiable claim{turn.droppedCount === 1 ? "" : "s"} omitted
@@ -80,6 +137,14 @@ export function InquiryPanel({ conversationId }: InquiryPanelProps) {
             </div>
           );
         })}
+        {sending && (
+          <div className="flex items-center gap-1.5 text-xs text-muted" aria-live="polite">
+            <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-muted [animation-delay:-0.3s]" />
+            <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-muted [animation-delay:-0.15s]" />
+            <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-muted" />
+            <span>Looking this up…</span>
+          </div>
+        )}
       </div>
       <div className="border-t border-hairline p-3">
         <Input

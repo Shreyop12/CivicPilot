@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { InquiryPanel } from "./InquiryPanel";
 import { postChat } from "../api/client";
+import type { ChatResponse } from "../api/types";
 
 vi.mock("../api/client", () => ({
   postChat: vi.fn(),
@@ -51,6 +52,28 @@ describe("InquiryPanel", () => {
     await userEvent.type(screen.getByLabelText(/ask a follow-up/i), "What did EPA spend this year?{Enter}");
 
     await waitFor(() => expect(screen.getByText("Calendar year or fiscal year?")).toBeInTheDocument());
+  });
+
+  it("shows a thinking indicator while a request is in flight", async () => {
+    let resolveChat: (value: ChatResponse) => void = () => {};
+    vi.mocked(postChat).mockReturnValue(
+      new Promise((resolve) => {
+        resolveChat = resolve;
+      })
+    );
+    render(<InquiryPanel conversationId="conv-1" />);
+
+    await userEvent.type(screen.getByLabelText(/ask a follow-up/i), "What did EPA spend?{Enter}");
+
+    expect(screen.getByText(/looking this up/i)).toBeInTheDocument();
+
+    resolveChat({
+      answer: "EPA spent $1B [award:068-FY2026].",
+      dropped_claims: [],
+      needs_clarification: false,
+      clarification_question: null,
+    });
+    await waitFor(() => expect(screen.queryByText(/looking this up/i)).not.toBeInTheDocument());
   });
 
   it("shows an error bubble when the request fails", async () => {
